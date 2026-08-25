@@ -1,0 +1,48 @@
+{
+  "base_config_directory": "examples/five_home_block/config",
+  "output_directory": "examples/five_home_block/outputs_parametric",
+  "variable_home_ids": [
+    "home_02",
+    "home_03",
+    "home_04",
+    "home_05"
+  ],
+  "maximum_erwh_homes": 1,
+  "seasons": [
+    {
+      "season_id": "summer",
+      "selection": "max_cooling_degree_hours",
+      "base_temperature_c": 24.0,
+      "reporting_hours": 168,
+      "warmup_hours": 48
+    },
+    {
+      "season_id": "winter",
+      "selection": "max_heating_degree_hours",
+      "base_temperature_c": 18.0,
+      "reporting_hours": 168,
+      "warmup_hours": 48
+    }
+  ],
+  "gas_furnace": {
+    "afue": 0.95,
+    "capacity_source": "existing_hpxml_backup_capacity",
+    "auxiliary_power_source": "existing_hpxml_heating_equipment"
+  },
+  "gas_water_heater": {
+    "energy_factor": 0.64,
+    "burner_efficiency": 0.76,
+    "capacity_w": 12000.0,
+    "ua_w_per_k": 2.5,
+    "tank_volume_source": "existing_hpxml_water_heater"
+  },
+  "electric_resistance_water_heater": {
+    "efficiency": 1.0,
+    "capacity_w": 4500.0,
+    "tank_volume_source": "existing_hpxml_water_heater"
+  },
+  "profile_storage": {
+    "format": "parquet",
+    "compression": "zstd"
+  }
+}

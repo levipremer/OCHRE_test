@@ -186,12 +186,62 @@ speed options. MSHPs are always modeled as variable speed equipment.
 The ASHP and MSHP models include heating and cooling functionality. The heat
 pump heating model includes a few unique features:
 
--  An electric resistance backup element with additional controls, including
-   an offset thermostat deadband.
+-  An electric resistance backup system with staged thermostat control.
 -  A heat pump shut off control when the outdoor air temperature is below a
    threshold.
--  A reverse cycle defrost algorithm that reduces heat pump efficiency and
-   capacity at low temperatures.
+-  A reverse-cycle defrost algorithm. The default ``Legacy`` model retains
+   the original time-averaged EnergyPlus/DOE-2 capacity and power adjustments.
+   The optional ``Discrete`` model produces explicit reverse-cycle events.
+
+Staged backup control applies to thermostat-controlled (non-ideal) ASHPs and
+to variable-speed ideal-capacity ASHPs using discrete defrost. Their backup
+resistance capacity is rounded to the nearest 5 kW and divided into 5 or 10 kW
+elements. Systems at 10 kW use two 5 kW stages, systems at 15 kW use a 10 kW
+stage followed by a 5 kW stage, and systems of 20 kW or larger minimize the
+number of stages by using 10 kW elements plus a 5 kW remainder. Explicit stage
+capacities override both this allocation and the total backup capacity.
+
+The first backup stage turns on when indoor temperature is 1.5 C below the
+heating setpoint. If the temperature does not rise above that threshold during
+the configurable escalation delay, one more stage turns on and the timer
+restarts. Once temperature enters the 1.5 C backup deadband, all active stages
+remain on and escalation stops. They all turn off together at the upper
+threshold, the heating setpoint. For variable-speed ideal-capacity equipment,
+the heat pump modulates to meet the remaining load after active ER stages are
+subtracted. Single- and two-speed equipment that enters ideal-capacity mode
+only because its timestep is at least five minutes retains continuous
+residual-load backup dispatch and its unrounded HPXML backup capacity.
+
+For discrete defrost, ``Defrost Control Type`` can be ``Timer``, ``Demand``,
+or ``Auto``. Auto uses Timer for single- and two-speed equipment and Demand
+for variable-speed equipment and mini-splits. Timer accumulates eligible
+compressor heating runtime below the defrost temperature threshold. Demand
+reuses the weather-dependent legacy defrost fraction as a frost accumulation
+rate. If the legacy fraction is :math:`f`, equivalent defrost time accumulates
+at :math:`f/(1-f)` per unit of normal compressor runtime. Both strategies
+produce configurable-duration events and preserve state when a cold-weather
+heating call is interrupted.
+
+During a discrete event, the refrigerant cycle is reversed. ``Defrost ER
+Strategy`` controls backup dispatch: ``Aggressive`` enables all available ER
+capacity, while ``Conservative`` enables only the first physical 5 or 10 kW
+stage. This applies to thermostat-controlled, variable-speed ideal-capacity,
+and coarse-timestep ideal-capacity ASHPs. For coarse-timestep ideal equipment,
+the first stage is derived from the automatic staging rules only for defrost;
+normal heating retains continuous residual-load ER. Normal ER staging state and
+its escalation timer pause during an active defrost event.
+
+The negative indoor heat-pump capacity is estimated from the normal heating
+energy balance:
+
+.. math::
+
+   Q_{HP,defrost} = -(Q_{HP,heating} - P_{HP})
+
+This makes defrost capacity respond to the current indoor temperature,
+outdoor temperature, compressor speed, capacity, and EIR. The indoor blower
+remains on. Separate multipliers allow calibration of reverse-cycle heat
+extraction and compressor power when measured equipment data are available.
 
 All HVAC equipment can be externally controlled by updating the thermostat
 setpoints and deadband or by direct load control (i.e., shut-off). Specific

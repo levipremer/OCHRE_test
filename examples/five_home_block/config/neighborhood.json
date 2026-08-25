@@ -1,0 +1,21 @@
+{
+  "start_time": "2018-01-01T00:00:00",
+  "duration_hours": 24,
+  "time_step_minutes": 1,
+  "initialization_hours": 0,
+  "weather_file": "examples/five_home_block/inputs/weather/G1801570.epw",
+  "output_directory": "examples/five_home_block/outputs",
+  "random_seed": 20260805,
+  "verbosity": 7,
+  "plot_dpi": 160,
+  "numerical_tolerance_kw": 1e-6,
+  "power_balance_tolerance_kw": 1e-6,
+  "maximum_home_power_kw": 100.0,
+  "defrost_model": "Discrete",
+  "defrost_control_type": "Auto",
+  "defrost_er_strategy": "Aggressive",
+  "transformer": {
+    "power_rating_kva": 50.0,
+    "overload_capacity_percent": 150.0
+  }
+}

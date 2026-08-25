@@ -2,6 +2,36 @@
 
 # OCHRE: The Object-oriented Controllable High-resolution Residential Energy Model
 
+> **Work fork:** This repository extends the base OCHRE model with HVAC
+> defrost and staged backup-heat behavior, system-identification and predictive-
+> control experiments, and multi-home/HEMS examples. See
+> [CUSTOM_CHANGES.md](CUSTOM_CHANGES.md) for the differences from base OCHRE
+> and the current limitations.
+
+## Work-fork quick start
+
+The custom work is based on OCHRE commit `458b9b2`. Use Python 3.9 through
+3.12 and install the repository in editable mode:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e . pytest
+```
+
+Useful starting points are:
+
+- `examples/five_home_block/run_simulation.py` for the five-home neighborhood;
+- `examples/five_home_block/run_parametric_study.py` for the seasonal
+  electrification study;
+- `examples/single_home_hems/run_simulation.py` and
+  `examples/single_home_hems/hems.py` for single-home control and future EV
+  work;
+- the notebooks under `bin/` for system identification, MPC, TOU MPC, and
+  DeePC experiments. The predictive-control notebooks additionally require
+  `cvxpy`.
+
+The original OCHRE overview and usage documentation follow below.
+
 OCHRE&trade; is a Python-based energy modeling tool designed to model end-use
 loads and distributed energy resources in residential buildings. It can model
 flexible devices---including HVAC equipment, water heaters, electric vehicles,

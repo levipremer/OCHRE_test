@@ -6,11 +6,37 @@
 .vscode/
 .venv
 __pycache__/
+.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
 src/
 build/
 dist/
 docs/_build
 *.egg-info/
 *.code-workspace
+~$*
 
 ochre/defaults/Input Files/OCHRE*
+
+# Local outputs from the example scripts in bin/
+/bin/MyHouse*
+/bin/ochre*
+/bin/*_complete
+/bin/*.png
+/bin/*.eps
+/bin/*.zip
+/bin/home.xml
+/bin/in.osm
+/bin/in.schedules.csv
+/bin/toDo.txt
+/workflow.osw
+
+# Generated example outputs are reproducible and can be large.
+/examples/**/outputs*/
+
+# Keep only the active five-home input cohort in version control.
+/examples/five_home_block/inputs/**/*.zip
+/examples/five_home_block/inputs/**/*.osm
+/examples/five_home_block/inputs/resstock_2024_2_up11/home_*/
+/examples/five_home_block/inputs/resstock_2024_2_up11/two_story_unconditioned_basement/home_01_bldg0365144-up11/
