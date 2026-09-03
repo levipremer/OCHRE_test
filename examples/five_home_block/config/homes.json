@@ -17,11 +17,34 @@
     "backup_number_of_stages": null,
     "backup_stage_capacities_kw": null,
     "water_heater_setpoint_c": 51.0,
-    "ev_capacity_kwh": 45,
-    "ev_charger_power_kw": 11.5,
-    "ev_arrival_time": "16:30",
-    "ev_departure_time": "06:30",
-    "ev_arrival_soc_fraction": 0.42
+    "evs": [
+	{
+	    "vehicle_id": "01A",
+	    "vehicle_type": "sedan",
+	    "capacity_kwh": 60,
+	    "charger_power_kw": 7.2,
+	    "nom_commute_arrival_time": "17:00",
+	    "nom_commute_departure_time": "08:00",
+	    "work_from_home_probability": 0.2,
+	    "initial_soc_fraction": 0.1,
+        "max_commute_distance_var_miles": 5,
+	    "max_commute_times_var_hr": 0.5,
+        "max_roundtrip_miles": 150
+	},
+	{
+	    "vehicle_id": "01B",
+	    "vehicle_type": "truck",
+	    "capacity_kwh": 135,
+	    "charger_power_kw": 11.5,
+	    "nom_commute_arrival_time": "17:00",
+	    "nom_commute_departure_time": "08:00",
+	    "work_from_home_probability": 0.2,
+	    "initial_soc_fraction": 0.2,
+        "max_commute_distance_var_miles": 5,
+	    "max_commute_times_var_hr": 0.5,
+        "max_roundtrip_miles": 150
+	}
+    ]
   },
   {
     "home_id": "home_02",
@@ -41,11 +64,34 @@
     "backup_number_of_stages": null,
     "backup_stage_capacities_kw": null,
     "water_heater_setpoint_c": 52.0,
-    "ev_capacity_kwh": 60,
-    "ev_charger_power_kw": 7.2,
-    "ev_arrival_time": "17:45",
-    "ev_departure_time": "07:00",
-    "ev_arrival_soc_fraction": 0.50
+    "evs": [
+	{
+	    "vehicle_id": "02_A",
+	    "vehicle_type": "sedan",
+	    "capacity_kwh": 60,
+	    "charger_power_kw": 7.2,
+	    "work_from_home_probability": 0.2,
+	    "initial_soc_fraction": 0.3,
+        "max_commute_distance_var_miles": 5,
+	    "max_commute_times_var_hr": 0.5,
+        "max_roundtrip_miles": 150
+
+	},
+	{
+	    "vehicle_id": "02_B",
+	    "vehicle_type": "truck",
+	    "capacity_kwh": 135,
+	    "charger_power_kw": 11.5,
+	    "nom_commute_arrival_time": "17:00",
+	    "nom_commute_departure_time": "08:00",
+	    "work_from_home_probability": 0.2,
+	    "initial_soc_fraction": 0.4,
+        "max_commute_distance_var_miles": 5,
+	    "max_commute_times_var_hr": 0.5,
+        "max_roundtrip_miles": 150
+
+	}
+    ]
   },
   {
     "home_id": "home_03",
@@ -65,11 +111,35 @@
     "backup_number_of_stages": null,
     "backup_stage_capacities_kw": null,
     "water_heater_setpoint_c": 53.0,
-    "ev_capacity_kwh": 75,
-    "ev_charger_power_kw": 7.2,
-    "ev_arrival_time": "19:00",
-    "ev_departure_time": "07:30",
-    "ev_arrival_soc_fraction": 0.35
+    "evs": [
+	{
+	    "vehicle_id": "03_A",
+	    "vehicle_type": "sedan",
+	    "capacity_kwh": 60,
+	    "charger_power_kw": 7.2,
+	    "nom_commute_arrival_time": "17:00",
+	    "nom_commute_departure_time": "08:00",
+	    "work_from_home_probability": 0.2,
+	    "initial_soc_fraction": 0.5,
+        "max_commute_distance_var_miles": 5,
+	    "max_commute_times_var_hr": 0.5,
+        "max_roundtrip_miles": 150
+
+	},
+	{
+	    "vehicle_id": "03_B",
+	    "vehicle_type": "truck",
+	    "capacity_kwh": 135,
+	    "charger_power_kw": 11.5,
+	    "nom_commute_arrival_time": "17:00",
+	    "nom_commute_departure_time": "08:00",
+	    "work_from_home_probability": 0.2,
+	    "initial_soc_fraction": 0.6,
+        "max_commute_distance_var_miles": 5,
+	    "max_commute_times_var_hr": 0.5,
+        "max_roundtrip_miles": 150
+	}
+    ]
   },
   {
     "home_id": "home_04",
@@ -89,11 +159,36 @@
     "backup_number_of_stages": null,
     "backup_stage_capacities_kw": null,
     "water_heater_setpoint_c": 50.5,
-    "ev_capacity_kwh": 50,
-    "ev_charger_power_kw": 3.6,
-    "ev_arrival_time": "18:15",
-    "ev_departure_time": "06:45",
-    "ev_arrival_soc_fraction": 0.58
+    "evs": [
+	{
+	    "vehicle_id": "04_A",
+	    "vehicle_type": "sedan",
+	    "capacity_kwh": 60,
+	    "charger_power_kw": 7.2,
+	    "nom_commute_arrival_time": "17:00",
+	    "nom_commute_departure_time": "08:00",
+	    "work_from_home_probability": 0.2,
+	    "initial_soc_fraction": 0.7,
+        "max_commute_distance_var_miles": 5,
+	    "max_commute_times_var_hr": 0.5,
+        "max_roundtrip_miles": 150
+
+	},
+	{
+	    "vehicle_id": "04_B",
+	    "vehicle_type": "truck",
+	    "capacity_kwh": 135,
+	    "charger_power_kw": 11.5,
+	    "nom_commute_arrival_time": "17:00",
+	    "nom_commute_departure_time": "08:00",
+	    "work_from_home_probability": 0.2,
+	    "initial_soc_fraction": 0.8,
+        "max_commute_distance_var_miles": 5,
+	    "max_commute_times_var_hr": 0.5,
+        "max_roundtrip_miles": 150
+
+	}
+    ]
   },
   {
     "home_id": "home_05",
@@ -113,10 +208,35 @@
     "backup_number_of_stages": null,
     "backup_stage_capacities_kw": null,
     "water_heater_setpoint_c": 54.0,
-    "ev_capacity_kwh": 82,
-    "ev_charger_power_kw": 11.5,
-    "ev_arrival_time": "20:00",
-    "ev_departure_time": "08:00",
-    "ev_arrival_soc_fraction": 0.28
+    "evs": [
+	{
+	    "vehicle_id": "05_A",
+	    "vehicle_type": "sedan",
+	    "capacity_kwh": 60,
+	    "charger_power_kw": 7.2,
+	    "nom_commute_arrival_time": "17:00",
+	    "nom_commute_departure_time": "08:00",
+	    "work_from_home_probability": 0.2,
+	    "initial_soc_fraction": 0.9,
+        "max_commute_distance_var_miles": 5,
+	    "max_commute_times_var_hr": 0.5,
+        "max_roundtrip_miles": 150
+
+	},
+	{
+	    "vehicle_id": "05_B",
+	    "vehicle_type": "truck",
+	    "capacity_kwh": 135,
+	    "charger_power_kw": 11.5,
+	    "nom_commute_arrival_time": "17:00",
+	    "nom_commute_departure_time": "08:00",
+	    "work_from_home_probability": 0.2,
+	    "initial_soc_fraction": 1.0,
+        "max_commute_distance_var_miles": 5,
+	    "max_commute_times_var_hr": 0.5,
+        "max_roundtrip_miles": 150
+
+	}
+    ]
   }
 ]

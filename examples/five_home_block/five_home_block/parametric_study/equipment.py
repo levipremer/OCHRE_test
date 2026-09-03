@@ -6,6 +6,7 @@ import datetime as dt
 import xml.etree.ElementTree as ET
 
 import pandas as pd
+import numpy as np
 
 from ochre import Dwelling
 
@@ -14,6 +15,15 @@ from ..home_factory import _equipment_overrides, _set_thermostats, _single_equip
 from .config import ParametricStudyConfig, ResolvedSeason
 from .cooking import FuelAwareCookingRange
 from .scenarios import EquipmentState
+from ..home_factory import (
+    _equipment_overrides,
+    _set_thermostats,
+    _single_equipment,
+    build_trip_pool,
+    _load_weather_raw,
+    build_ev_multiday_schedule,
+)
+from ..config import NeighborhoodConfig
 
 
 BTU_PER_HOUR_TO_W = 0.29307107
@@ -54,30 +64,101 @@ def build_daily_ev_events(
         )
     return pd.DataFrame(rows)
 
-
 def build_scenario_equipment_overrides(
     study: ParametricStudyConfig,
     home: HomeConfig,
     period: ResolvedSeason,
     state: EquipmentState,
+    rng,
 ) -> dict[str, dict]:
     """Layer one equipment state over the existing per-home controls."""
     base = study.base
+
+    neighborhood = base.neighborhood
+
+    # Build EV trip pool and weather for this scenario
+    trip_pool = build_trip_pool(
+        neighborhood.ev_trip_file,
+        neighborhood.NHTS_location_CDIVMSAR_ID,
+    )
+    weather_by_mdhm = _load_weather_raw(neighborhood.weather_file)
+
+    # Call the updated equipment overrides with all required arguments
     overrides = _equipment_overrides(
         home,
         period.run_start,
         defrost_model=base.defrost_model,
         defrost_control_type=base.defrost_control_type,
         defrost_er_strategy=base.defrost_er_strategy,
+        rng=rng,
+        neighborhood=neighborhood,
+        trip_pool=trip_pool,
+        weather_by_mdhm=weather_by_mdhm,
     )
-    if state.has_ev:
-        overrides["Electric Vehicle"]["charging_level"] = study.ev.charging_level
-        overrides["Electric Vehicle"]["event_schedule"] = build_daily_ev_events(
-            home, period.run_start, period.run_end
-        )
-    else:
-        overrides.pop("Electric Vehicle", None)
 
+    # --- Fuel switching for heating and water heating ---
+
+    if state.heating == "gas":
+        overrides.pop("ASHP Heater", None)
+        overrides["HVAC Heating"] = {
+            "Equipment Name": "Furnace",
+            "Fuel": "Natural gas",
+            "EIR (-)": 1 / study.gas_furnace.afue,
+            "Rated Efficiency": f"{study.gas_furnace.afue:g} AFUE",
+            "Number of Speeds (-)": 1,
+            "Capacity (W)": _hpxml_backup_heating_capacity_w(home),
+        }
+
+    if state.water_heating == "gas":
+        gas = study.gas_water_heater
+        overrides["Water Heating"] = {
+            "Equipment Name": "storage water heater",
+            "Fuel": "Natural gas",
+            "Setpoint Temperature (C)": home.water_heater_setpoint_c,
+            "Energy Factor (-)": gas.energy_factor,
+            "Efficiency (-)": gas.burner_efficiency,
+            "Capacity (W)": gas.capacity_w,
+            "UA (W/K)": gas.ua_w_per_k,
+        }
+    elif state.water_heating == "erwh":
+        resistance = study.electric_resistance_water_heater
+        overrides["Water Heating"] = {
+            "Equipment Name": "storage water heater",
+            "Fuel": "Electricity",
+            "Setpoint Temperature (C)": home.water_heater_setpoint_c,
+            "Efficiency (-)": resistance.efficiency,
+            "Capacity (W)": resistance.capacity_w,
+        }
+
+    overrides.setdefault("Cooking Range", {})["equipment_class"] = FuelAwareCookingRange
+    return overrides
+
+def build_scenario_equipment_overrides(
+    study: ParametricStudyConfig,
+    home: HomeConfig,
+    period: ResolvedSeason,
+    state: EquipmentState,
+    rng,
+) -> dict[str, dict]:
+    """Layer one equipment state over the existing per-home controls."""
+    base = study.base
+
+    # EV inputs come from base config, not from a neighborhood object
+    trip_pool = build_trip_pool(
+        base.ev_trip_file,
+        base.NHTS_location_CDIVMSAR_ID,
+    )
+
+    overrides = _equipment_overrides(
+        home,
+        base,
+        rng,
+        defrost_model=base.defrost_model,
+        defrost_control_type=base.defrost_control_type,
+        defrost_er_strategy=base.defrost_er_strategy,
+    )
+
+    # --- Fuel switching overrides (unchanged) ---
     if state.heating == "gas":
         overrides.pop("ASHP Heater", None)
         overrides["HVAC Heating"] = {
@@ -141,7 +222,7 @@ def create_scenario_dwelling(
         modify_hpxml_dict={
             "Appliances": {"CookingRange": {"FuelType": cooking_fuel}}
         },
-        Equipment=build_scenario_equipment_overrides(study, home, period, state),
+        Equipment=build_scenario_equipment_overrides(study, home, period, state, np.random.default_rng(base.random_seed + home.seed_offset)),
     )
     _set_thermostats(dwelling, home)
     validate_scenario_equipment(dwelling, home.home_id, state)
@@ -155,7 +236,6 @@ def validate_scenario_equipment(
     heater = _single_equipment(dwelling, "HVAC Heating", home_id)
     water_heater = _single_equipment(dwelling, "Water Heating", home_id)
     cooking = dwelling.equipment.get("Cooking Range")
-    ev = dwelling.get_equipment_by_end_use("EV")
     if cooking is None:
         raise RuntimeError(f"{home_id}: Cooking Range equipment is missing")
 
@@ -184,11 +264,3 @@ def validate_scenario_equipment(
         raise RuntimeError(f"{home_id}: gas cooking state is not gas capable")
     if state.cooking == "electric" and cooking.is_gas:
         raise RuntimeError(f"{home_id}: electric cooking state reports gas capability")
-
-    if state.has_ev:
-        if ev is None or isinstance(ev, list):
-            raise RuntimeError(f"{home_id}: expected exactly one Level 2 EV")
-        if not ev.is_electric or ev.is_gas:
-            raise RuntimeError(f"{home_id}: EV is not electric-only")
-    elif ev is not None:
-        raise RuntimeError(f"{home_id}: no-EV state instantiated EV equipment")

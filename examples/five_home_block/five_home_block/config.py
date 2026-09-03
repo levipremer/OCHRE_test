@@ -30,6 +30,65 @@ def _parse_clock(value: str, label: str) -> dt.time:
     except ValueError as exc:
         raise ConfigurationError(f"{label} must use HH:MM format, got {value!r}") from exc
 
+@dataclass(frozen=True)
+class EVConfig:
+    vehicle_id: str
+    vehicle_type: str
+    capacity_kwh: float
+    charger_power_kw: float
+    nom_commute_arrival_time: dt.time | None
+    nom_commute_departure_time: dt.time | None
+    nom_commute_miles: float | None
+    work_from_home_probability: float
+    initial_soc_fraction: float
+    max_commute_distance_var_miles: float | None
+    max_commute_times_var_hr: float | None
+    max_roundtrip_miles: float | None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EVConfig":
+        return cls(
+            vehicle_id=str(data["vehicle_id"]),
+            vehicle_type=str(data["vehicle_type"]),
+            capacity_kwh=float(data["capacity_kwh"]),
+            charger_power_kw=float(data["charger_power_kw"]),
+
+            nom_commute_arrival_time=(
+                _parse_clock(data["nom_commute_arrival_time"], "Typical EV arrival time")
+                if "nom_commute_arrival_time" in data
+                else None
+            ),
+            nom_commute_departure_time=(
+                _parse_clock(data["nom_commute_departure_time"], "Typical EV departure time")
+                if "nom_commute_departure_time" in data
+                else None
+            ),
+            nom_commute_miles=(
+                float(data["nom_commute_miles"])
+                if "nom_commute_miles" in data
+                else None
+            ),
+
+            work_from_home_probability=float(data["work_from_home_probability"]),
+            initial_soc_fraction=float(data["initial_soc_fraction"]),
+
+            # NEW OPTIONAL FIELDS
+            max_commute_distance_var_miles=(
+                float(data["max_commute_distance_var_miles"])
+                if "max_commute_distance_var_miles" in data
+                else None
+            ),
+            max_commute_times_var_hr=(
+                float(data["max_commute_times_var_hr"])
+                if "max_commute_times_var_hr" in data
+                else None
+            ),
+            max_roundtrip_miles=(
+                float(data["max_roundtrip_miles"])
+                if "max_roundtrip_miles" in data
+                else None
+            ),
+        )
 
 @dataclass(frozen=True)
 class HomeConfig:
@@ -52,11 +111,7 @@ class HomeConfig:
     backup_number_of_stages: int | None
     backup_stage_capacities_kw: tuple[float, ...] | None
     water_heater_setpoint_c: float
-    ev_capacity_kwh: float
-    ev_charger_power_kw: float
-    ev_arrival_time: dt.time
-    ev_departure_time: dt.time
-    ev_arrival_soc_fraction: float
+    evs: tuple[EVConfig, ...]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], repo_root: Path) -> "HomeConfig":
@@ -67,6 +122,8 @@ class HomeConfig:
             raise ConfigurationError(f"Home config is missing fields: {sorted(missing)}")
 
         stage_capacities = data["backup_stage_capacities_kw"]
+        evs_data = data["evs"]
+        evs = tuple(EVConfig.from_dict(ev) for ev in evs_data)
         config = cls(
             home_id=str(data["home_id"]),
             description=str(data["description"]),
@@ -95,11 +152,7 @@ class HomeConfig:
                 else None
             ),
             water_heater_setpoint_c=float(data["water_heater_setpoint_c"]),
-            ev_capacity_kwh=float(data["ev_capacity_kwh"]),
-            ev_charger_power_kw=float(data["ev_charger_power_kw"]),
-            ev_arrival_time=_parse_clock(data["ev_arrival_time"], "EV arrival time"),
-            ev_departure_time=_parse_clock(data["ev_departure_time"], "EV departure time"),
-            ev_arrival_soc_fraction=float(data["ev_arrival_soc_fraction"]),
+            evs = evs,
         )
         config.validate()
         return config
@@ -113,12 +166,56 @@ class HomeConfig:
             "backup_deadband_c": self.backup_deadband_c,
             "backup_setpoint_offset_c": self.backup_setpoint_offset_c,
             "backup_stage_escalation_delay_min": self.backup_stage_escalation_delay_min,
-            "ev_capacity_kwh": self.ev_capacity_kwh,
-            "ev_charger_power_kw": self.ev_charger_power_kw,
         }
         for label, value in positive.items():
             if value <= 0:
                 raise ConfigurationError(f"{self.home_id}: {label} must be positive")
+
+        for ev in self.evs:
+            # Capacity must be positive
+            if ev.capacity_kwh <= 0:
+                raise ConfigurationError(
+                    f"{self.home_id}: EV {ev.vehicle_id} capacity_kwh must be positive"
+                )
+
+            # Charger power must be positive
+            if ev.charger_power_kw <= 0:
+                raise ConfigurationError(
+                    f"{self.home_id}: EV {ev.vehicle_id} charger_power_kw must be positive"
+                )
+
+            # Initial SOC must be between 0 and 1
+            if not 0 <= ev.initial_soc_fraction <= 1:
+                raise ConfigurationError(
+                    f"{self.home_id}: EV {ev.vehicle_id} initial SOC must be between zero and one"
+                )
+
+            # Work-from-home probability must be between 0 and 1
+            if not 0 <= ev.work_from_home_probability <= 1:
+                raise ConfigurationError(
+                    f"{self.home_id}: EV {ev.vehicle_id} work-from-home probability must be between zero and one"
+                )
+
+            # Vehicle type must be one of the supported types
+            if ev.vehicle_type.lower() not in {"sedan", "suv", "truck"}:
+                raise ConfigurationError(
+                    f"{self.home_id}: EV {ev.vehicle_id} vehicle_type must be sedan, suv, or truck"
+                )
+            if ev.max_commute_distance_var_miles is not None and ev.max_commute_distance_var_miles < 0:
+                raise ConfigurationError(
+                    f"{self.home_id}: EV {ev.vehicle_id} max_commute_distance_var_miles cannot be negative"
+                )
+
+            if ev.max_commute_times_var_hr is not None and ev.max_commute_times_var_hr < 0:
+                raise ConfigurationError(
+                    f"{self.home_id}: EV {ev.vehicle_id} max_commute_times_var_hr cannot be negative"
+                )
+
+            if ev.max_roundtrip_miles is not None and ev.max_roundtrip_miles <= 0:
+                raise ConfigurationError(
+                    f"{self.home_id}: EV {ev.vehicle_id} max_roundtrip_miles must be positive"
+                )
+
         if self.backup_number_of_stages is not None and self.backup_number_of_stages <= 0:
             raise ConfigurationError(
                 f"{self.home_id}: backup_number_of_stages must be a positive integer"
@@ -156,8 +253,6 @@ class HomeConfig:
             raise ConfigurationError(
                 f"{self.home_id}: cooling setpoint must be at least 1 C above heating setpoint"
             )
-        if not 0 <= self.ev_arrival_soc_fraction <= 1:
-            raise ConfigurationError(f"{self.home_id}: EV arrival SOC must be between zero and one")
 
 
 @dataclass(frozen=True)
@@ -171,6 +266,8 @@ class NeighborhoodConfig:
     time_step: dt.timedelta
     initialization_time: dt.timedelta | None
     weather_file: Path
+    ev_trip_file: Path
+    NHTS_location_CDIVMSAR_ID: int | None
     output_directory: Path
     random_seed: int
     verbosity: int
@@ -271,6 +368,8 @@ def load_configuration(config_directory: Path, repo_root: Path | None = None) ->
         ).strip().title(),
         transformer=transformer,
         homes=homes,
+        ev_trip_file=_resolve_file(repo_root, data["ev_trip_file"], "EV trip file"),
+        NHTS_location_CDIVMSAR_ID=int(data.get("NHTS_location_CDIVMSAR_ID", 0)),
     )
     config.validate()
     return config
