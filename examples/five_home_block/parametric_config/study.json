@@ -8,6 +8,11 @@
     "home_05"
   ],
   "maximum_erwh_homes": 1,
+  "ev": {
+    "maximum_per_home": 1,
+    "charging_level": "Level 2",
+    "vary_for_home_01": false
+  },
   "seasons": [
     {
       "season_id": "summer",
@@ -18,8 +23,9 @@
     },
     {
       "season_id": "winter",
-      "selection": "max_heating_degree_hours",
+      "selection": "closest_minimum_temperature",
       "base_temperature_c": 18.0,
+      "target_minimum_temperature_c": -15.0,
       "reporting_hours": 168,
       "warmup_hours": 48
     }
@@ -44,5 +50,11 @@
   "profile_storage": {
     "format": "parquet",
     "compression": "zstd"
+  },
+  "reporting": {
+    "top_scenarios_per_season": 10,
+    "representative_scenarios_per_season": 10,
+    "analysis_chunk_size": 256,
+    "plot_resample_minutes": 15
   }
 }

@@ -70,9 +70,13 @@ def build_scenario_equipment_overrides(
         defrost_control_type=base.defrost_control_type,
         defrost_er_strategy=base.defrost_er_strategy,
     )
-    overrides["Electric Vehicle"]["event_schedule"] = build_daily_ev_events(
-        home, period.run_start, period.run_end
-    )
+    if state.has_ev:
+        overrides["Electric Vehicle"]["charging_level"] = study.ev.charging_level
+        overrides["Electric Vehicle"]["event_schedule"] = build_daily_ev_events(
+            home, period.run_start, period.run_end
+        )
+    else:
+        overrides.pop("Electric Vehicle", None)
 
     if state.heating == "gas":
         overrides.pop("ASHP Heater", None)
@@ -151,6 +155,7 @@ def validate_scenario_equipment(
     heater = _single_equipment(dwelling, "HVAC Heating", home_id)
     water_heater = _single_equipment(dwelling, "Water Heating", home_id)
     cooking = dwelling.equipment.get("Cooking Range")
+    ev = dwelling.get_equipment_by_end_use("EV")
     if cooking is None:
         raise RuntimeError(f"{home_id}: Cooking Range equipment is missing")
 
@@ -179,3 +184,11 @@ def validate_scenario_equipment(
         raise RuntimeError(f"{home_id}: gas cooking state is not gas capable")
     if state.cooking == "electric" and cooking.is_gas:
         raise RuntimeError(f"{home_id}: electric cooking state reports gas capability")
+
+    if state.has_ev:
+        if ev is None or isinstance(ev, list):
+            raise RuntimeError(f"{home_id}: expected exactly one Level 2 EV")
+        if not ev.is_electric or ev.is_gas:
+            raise RuntimeError(f"{home_id}: EV is not electric-only")
+    elif ev is not None:
+        raise RuntimeError(f"{home_id}: no-EV state instantiated EV equipment")

@@ -10,11 +10,12 @@ import pandas as pd
 
 @dataclass(frozen=True, order=True)
 class EquipmentState:
-    """Three end-use choices for one variable home."""
+    """Appliance and EV choices for one variable home."""
 
     heating: str
     water_heating: str
     cooking: str
+    ev: str
 
     def __post_init__(self) -> None:
         if self.heating not in {"gas", "electric"}:
@@ -23,10 +24,15 @@ class EquipmentState:
             raise ValueError(f"Unknown water-heating state: {self.water_heating}")
         if self.cooking not in {"gas", "electric"}:
             raise ValueError(f"Unknown cooking state: {self.cooking}")
+        if self.ev not in {"none", "present"}:
+            raise ValueError(f"Unknown EV state: {self.ev}")
 
     @property
     def state_id(self) -> str:
-        return f"heat-{self.heating}__water-{self.water_heating}__cook-{self.cooking}"
+        return (
+            f"heat-{self.heating}__water-{self.water_heating}__"
+            f"cook-{self.cooking}__ev-{self.ev}"
+        )
 
     @property
     def electrified_end_uses(self) -> int:
@@ -38,16 +44,23 @@ class EquipmentState:
     def has_erwh(self) -> bool:
         return self.water_heating == "erwh"
 
+    @property
+    def has_ev(self) -> bool:
+        return self.ev == "present"
 
-FIXED_HOME_STATE = EquipmentState("electric", "hpwh", "electric")
+
+FIXED_HOME_STATE = EquipmentState("electric", "hpwh", "electric", "present")
 
 
 def generate_equipment_states() -> tuple[EquipmentState, ...]:
-    """Return the 12 heating/water-heating/cooking states for one variable home."""
+    """Return the 24 appliance/EV states for one variable home."""
     return tuple(
-        EquipmentState(heating, water_heating, cooking)
-        for heating, water_heating, cooking in itertools.product(
-            ("gas", "electric"), ("gas", "hpwh", "erwh"), ("gas", "electric")
+        EquipmentState(heating, water_heating, cooking, ev)
+        for heating, water_heating, cooking, ev in itertools.product(
+            ("gas", "electric"),
+            ("gas", "hpwh", "erwh"),
+            ("gas", "electric"),
+            ("none", "present"),
         )
     )
 
@@ -77,6 +90,7 @@ def generate_scenario_manifest(
                 state.water_heating in {"hpwh", "erwh"} for state in selected
             )
             electric_cooking = sum(state.cooking == "electric" for state in selected)
+            ev_count = sum(state.has_ev for state in selected)
             conversions = sum(state.electrified_end_uses for state in selected)
             row: dict[str, object] = {
                 "scenario_id": f"{season_id}__scenario-{scenario_number:05d}",
@@ -89,9 +103,17 @@ def generate_scenario_manifest(
                 "hpwh_homes": sum(state.water_heating == "hpwh" for state in selected),
                 "erwh_homes": erwh_count,
                 "electric_cooking_homes": electric_cooking,
+                "ev_homes": ev_count,
+                "whole_block_ev_homes": 1 + ev_count,
                 "variable_home_electrified_end_uses": conversions,
                 "variable_home_electrification_fraction": conversions / 12,
                 "whole_block_electrification_fraction": (3 + conversions) / 15,
+                "variable_home_electrification_with_ev_fraction": (
+                    conversions + ev_count
+                ) / 16,
+                "whole_block_electrification_with_ev_fraction": (
+                    4 + conversions + ev_count
+                ) / 20,
             }
             for home_id, state in zip(variable_home_ids, selected):
                 row[f"{home_id}_state_id"] = state.state_id

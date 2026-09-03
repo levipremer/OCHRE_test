@@ -48,18 +48,31 @@ then layers the study-only assumptions from
 
 Home 1 stays fixed at its existing all-electric configuration. Homes 2-5 vary
 between gas and electric space heating, gas/HPWH/ERWH water heating, and gas or
-electric cooking. At most one of those four homes may use an ERWH. Electric
-HVAC sizing remains inherited from each existing HPXML, and all configured
+electric cooking. They also vary between no EV and one EV; every installed EV
+uses its home's configured Level 2 charger. At most one of those four homes may
+use an ERWH. Home 1 retains its existing EV in every scenario. Electric HVAC
+sizing remains inherited from each existing HPXML, and all configured
 deadbands, cycling rules, backup staging, defrost settings, setpoints, EV
-assumptions, and seeds come from the existing base configuration.
+assumptions, and seeds come from the existing base configuration. The five
+homes have distinct EV arrival, departure, and arrival-SOC schedules, which are
+repeated daily during this version of the study.
 
 The runner selects seven-day summer and winter degree-hour windows, prepends a
-48-hour warm-up, and caches 98 one-minute OCHRE profiles in compressed Parquet.
-It also writes a 24,576-row scenario manifest that maps every valid seasonal
+48-hour warm-up, and caches 194 one-minute OCHRE profiles in compressed Parquet.
+It also writes a 393,216-row scenario manifest that maps every valid seasonal
 neighborhood scenario to five cached profiles. The profiles retain electric,
 reactive, and gas power by relevant end use; no transformer size or transformer
 constraint is applied. Neighborhood time series can therefore be reconstructed
 later for arbitrary transformer post-processing.
+
+After the profiles are complete, the runner calculates the exact one-minute
+neighborhood peak for every scenario. It writes CSV and Parquet peak metrics, a
+top-scenario CSV, and a Markdown report under `outputs_parametric/reports/`.
+For each season, the report presents the Homes 2-5 all-gas/no-EV reference plus
+ten distinct scenarios selected at evenly spaced peak-power percentiles. Exact
+one-minute profiles for those weeks are retained in Parquet; the report figures
+use 15-minute averages for readability. Because Home 1 is fixed, the reference
+still includes Home 1's electric HVAC, HPWH, electric cooking, and EV.
 
 Run a short integration check with three representative equipment states using:
 

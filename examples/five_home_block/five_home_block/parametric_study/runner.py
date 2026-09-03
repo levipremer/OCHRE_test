@@ -13,6 +13,7 @@ import pandas as pd
 
 from ochre import __version__ as ochre_version
 
+from .analysis import create_scenario_report
 from .config import ParametricStudyConfig, ResolvedSeason, resolve_all_seasons
 from .equipment import create_scenario_dwelling
 from .outputs import standardize_profile, validate_profile
@@ -46,6 +47,7 @@ class StudyRunSummary:
     scenario_count: int
     cached_profile_count: int
     smoke_test: bool
+    report_file: Path | None = None
 
 
 class ParametricStudyRunner:
@@ -70,6 +72,7 @@ class ParametricStudyRunner:
             Path(__file__).with_name("equipment.py"),
             Path(__file__).with_name("cooking.py"),
             Path(__file__).with_name("outputs.py"),
+            Path(__file__).with_name("scenarios.py"),
         ]
         for home in self.config.base.homes:
             source_files.extend((home.hpxml_file, home.schedule_file))
@@ -169,6 +172,7 @@ class ParametricStudyRunner:
             "heating_state": request.state.heating,
             "water_heating_state": request.state.water_heating,
             "cooking_state": request.state.cooking,
+            "ev_state": request.state.ev,
             "run_start": request.season.run_start.isoformat(),
             "report_start": request.season.report_start.isoformat(),
             "report_end": request.season.report_end.isoformat(),
@@ -217,7 +221,7 @@ class ParametricStudyRunner:
             json.dump(resolved, stream, indent=2)
 
     def run(self, *, force: bool = False) -> StudyRunSummary:
-        """Run or reuse all 98 profiles and write the 24,576-row manifest."""
+        """Run or reuse all 194 profiles, enumerate scenarios, and report peaks."""
         self._prepare_directories()
         seasons = resolve_all_seasons(self.config)
         self._write_provenance(seasons)
@@ -242,6 +246,12 @@ class ParametricStudyRunner:
         manifest.to_parquet(
             manifest_parquet, compression=self.config.profile_storage.compression
         )
+        report = create_scenario_report(
+            self.config,
+            manifest,
+            self.profiles_directory,
+            self.config.output_directory / "reports",
+        )
         self._write_run_manifest(catalog, manifest, smoke_test=False)
         return StudyRunSummary(
             output_directory=self.config.output_directory,
@@ -251,6 +261,7 @@ class ParametricStudyRunner:
             scenario_count=len(manifest),
             cached_profile_count=cached,
             smoke_test=False,
+            report_file=report.report_file,
         )
 
     def run_smoke_test(
@@ -272,12 +283,14 @@ class ParametricStudyRunner:
         requests = (
             ProfileRequest(smoke_season, "home_01", FIXED_HOME_STATE, fixed=True),
             ProfileRequest(
-                smoke_season, self.config.variable_home_ids[0], EquipmentState("gas", "gas", "gas")
+                smoke_season,
+                self.config.variable_home_ids[0],
+                EquipmentState("gas", "gas", "gas", "none"),
             ),
             ProfileRequest(
                 smoke_season,
                 self.config.variable_home_ids[1],
-                EquipmentState("electric", "erwh", "electric"),
+                EquipmentState("electric", "erwh", "electric", "present"),
             ),
         )
         self._write_provenance((smoke_season,))

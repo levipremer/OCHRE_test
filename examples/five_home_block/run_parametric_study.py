@@ -69,6 +69,8 @@ def main() -> int:
     print(f"  Cached profiles reused: {summary.cached_profile_count}")
     print(f"  Scenarios: {summary.scenario_count}")
     print(f"  Output: {summary.output_directory}")
+    if summary.report_file is not None:
+        print(f"  Report: {summary.report_file}")
     return 0
 
 

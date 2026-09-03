@@ -22,6 +22,7 @@ class SeasonConfig:
     base_temperature_c: float
     reporting_hours: int
     warmup_hours: int
+    target_minimum_temperature_c: float | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SeasonConfig":
@@ -31,13 +32,27 @@ class SeasonConfig:
             base_temperature_c=float(data["base_temperature_c"]),
             reporting_hours=int(data["reporting_hours"]),
             warmup_hours=int(data["warmup_hours"]),
+            target_minimum_temperature_c=(
+                float(data["target_minimum_temperature_c"])
+                if data.get("target_minimum_temperature_c") is not None
+                else None
+            ),
         )
         if config.selection not in {
             "max_cooling_degree_hours",
             "max_heating_degree_hours",
+            "closest_minimum_temperature",
         }:
             raise ConfigurationError(
                 f"{config.season_id}: unsupported seasonal selection {config.selection!r}"
+            )
+        if (
+            config.selection == "closest_minimum_temperature"
+            and config.target_minimum_temperature_c is None
+        ):
+            raise ConfigurationError(
+                f"{config.season_id}: closest-minimum selection requires "
+                "target_minimum_temperature_c"
             )
         if config.reporting_hours <= 0 or config.warmup_hours < 0:
             raise ConfigurationError(
@@ -57,6 +72,7 @@ class ResolvedSeason:
     report_start: dt.datetime
     report_end: dt.datetime
     run_end: dt.datetime
+    target_minimum_temperature_c: float | None = None
 
     @property
     def duration(self) -> dt.timedelta:
@@ -94,9 +110,24 @@ class ElectricResistanceWaterHeaterConfig:
 
 
 @dataclass(frozen=True)
+class EVConfig:
+    maximum_per_home: int
+    charging_level: str
+    vary_for_home_01: bool
+
+
+@dataclass(frozen=True)
 class ProfileStorageConfig:
     format: str
     compression: str
+
+
+@dataclass(frozen=True)
+class ReportingConfig:
+    top_scenarios_per_season: int
+    representative_scenarios_per_season: int
+    analysis_chunk_size: int
+    plot_resample_minutes: int
 
 
 @dataclass(frozen=True)
@@ -113,7 +144,9 @@ class ParametricStudyConfig:
     gas_furnace: GasFurnaceConfig
     gas_water_heater: GasWaterHeaterConfig
     electric_resistance_water_heater: ElectricResistanceWaterHeaterConfig
+    ev: EVConfig
     profile_storage: ProfileStorageConfig
+    reporting: ReportingConfig
     base: NeighborhoodConfig
 
     def validate(self) -> None:
@@ -162,8 +195,34 @@ class ParametricStudyConfig:
             != "existing_hpxml_water_heater"
         ):
             raise ConfigurationError("Unsupported ERWH tank volume source")
+        if self.ev.maximum_per_home != 1:
+            raise ConfigurationError("The study requires a maximum of one EV per home")
+        if self.ev.charging_level != "Level 2":
+            raise ConfigurationError("All study EV chargers must be Level 2")
+        if self.ev.vary_for_home_01:
+            raise ConfigurationError("Home 1 must remain fixed, including its EV")
+        driving_schedules = [
+            (
+                home.ev_arrival_time,
+                home.ev_departure_time,
+                home.ev_arrival_soc_fraction,
+            )
+            for home in self.base.homes
+        ]
+        if len(driving_schedules) != len(set(driving_schedules)):
+            raise ConfigurationError(
+                "Each home must have a distinct EV arrival/departure/SOC schedule"
+            )
         if self.profile_storage.format != "parquet":
             raise ConfigurationError("The study currently supports parquet profile storage only")
+        if self.reporting.top_scenarios_per_season <= 0:
+            raise ConfigurationError("At least one top scenario must be reported")
+        if self.reporting.representative_scenarios_per_season <= 0:
+            raise ConfigurationError("At least one representative scenario is required")
+        if self.reporting.analysis_chunk_size <= 0:
+            raise ConfigurationError("Analysis chunk size must be positive")
+        if self.reporting.plot_resample_minutes <= 0:
+            raise ConfigurationError("Plot resampling interval must be positive")
 
     def home(self, home_id: str):
         return next(home for home in self.base.homes if home.home_id == home_id)
@@ -188,6 +247,7 @@ def load_study_configuration(
     base_directory = _resolve_path(repo_root, data["base_config_directory"])
     base = load_configuration(base_directory, repo_root=repo_root)
     storage = data["profile_storage"]
+    reporting = data["reporting"]
     config = ParametricStudyConfig(
         repo_root=repo_root,
         source_file=source_file,
@@ -201,7 +261,9 @@ def load_study_configuration(
         electric_resistance_water_heater=ElectricResistanceWaterHeaterConfig(
             **data["electric_resistance_water_heater"]
         ),
+        ev=EVConfig(**data["ev"]),
         profile_storage=ProfileStorageConfig(**storage),
+        reporting=ReportingConfig(**reporting),
         base=base,
     )
     config.validate()
@@ -231,10 +293,10 @@ def _read_epw_dry_bulb(weather_file: Path, year: int) -> pd.Series:
 def resolve_season(
     season: SeasonConfig, weather_file: Path, year: int
 ) -> ResolvedSeason:
-    """Select the midnight-starting weather window with maximum degree-hours."""
+    """Select a deterministic midnight-starting weather window."""
     temperature = _read_epw_dry_bulb(weather_file, year)
     reporting_delta = dt.timedelta(hours=season.reporting_hours)
-    candidates: list[tuple[float, pd.Timestamp]] = []
+    candidates: list[tuple[tuple[float, float], pd.Timestamp]] = []
     for start in temperature.index[temperature.index.hour == 0]:
         end = start + reporting_delta - dt.timedelta(hours=1)
         window = temperature.loc[start:end]
@@ -242,13 +304,26 @@ def resolve_season(
             continue
         if season.selection == "max_cooling_degree_hours":
             score = (window - season.base_temperature_c).clip(lower=0).sum()
-        else:
+            priority = (float(score), 0.0)
+        elif season.selection == "max_heating_degree_hours":
             score = (season.base_temperature_c - window).clip(lower=0).sum()
-        candidates.append((float(score), start))
+            priority = (float(score), 0.0)
+        else:
+            target = season.target_minimum_temperature_c
+            assert target is not None
+            minimum_error = abs(float(window.min()) - target)
+            heating_degree_hours = (
+                season.base_temperature_c - window
+            ).clip(lower=0).sum()
+            priority = (-minimum_error, float(heating_degree_hours))
+        candidates.append((priority, start))
     if not candidates:
         raise ConfigurationError(f"Could not resolve weather period for {season.season_id}")
 
-    _, report_start_timestamp = max(candidates, key=lambda item: (item[0], -item[1].dayofyear))
+    _, report_start_timestamp = max(
+        candidates,
+        key=lambda item: (*item[0], -item[1].dayofyear),
+    )
     report_start = report_start_timestamp.to_pydatetime()
     report_end = report_start + reporting_delta
     run_start = report_start - dt.timedelta(hours=season.warmup_hours)
@@ -260,6 +335,7 @@ def resolve_season(
         report_start=report_start,
         report_end=report_end,
         run_end=report_end,
+        target_minimum_temperature_c=season.target_minimum_temperature_c,
     )
 
 
