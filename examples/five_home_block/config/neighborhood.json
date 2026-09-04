@@ -1,9 +1,11 @@
 {
+  "NHTS_location_CDIVMSAR_ID": 33,
   "start_time": "2018-01-01T00:00:00",
-  "duration_hours": 24,
+  "duration_hours": 18,
   "time_step_minutes": 1,
   "initialization_hours": 0,
   "weather_file": "examples/five_home_block/inputs/weather/G1801570.epw",
+  "ev_trip_file": "examples/five_home_block/inputs/ev/tripv2pub.csv",
   "output_directory": "examples/five_home_block/outputs",
   "random_seed": 20260805,
   "verbosity": 7,
