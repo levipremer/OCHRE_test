@@ -6,6 +6,7 @@ import numpy as np
 
 import datetime as dt
 from pathlib import Path
+from typing import Mapping
 
 import pandas as pd
 
@@ -155,6 +156,113 @@ def summarize_chunk(chunk: list[dict]) -> dict:
         "trip_distance_miles": miles,
     }
 
+
+SECONDS_PER_DAY = 24 * 60 * 60
+
+
+def _trip_interval_seconds(trip: pd.Series) -> tuple[float, float]:
+    """Return a trip's home-to-home interval on a 24-hour clock."""
+    start = trip["trip_start_time"]
+    end = trip["trip_end_time"]
+    start_seconds = start.hour * 3600 + start.minute * 60 + start.second
+    end_seconds = end.hour * 3600 + end.minute * 60 + end.second
+    if end_seconds < start_seconds:
+        end_seconds += SECONDS_PER_DAY
+    return start_seconds, end_seconds
+
+
+def _clock_intervals_overlap(
+    first: tuple[float, float], second: tuple[float, float]
+) -> bool:
+    """Return whether two daily intervals overlap, including across midnight."""
+    first_start, first_end = first
+    second_start, second_end = second
+    return any(
+        first_start < second_end + offset and second_start + offset < first_end
+        for offset in (-SECONDS_PER_DAY, 0, SECONDS_PER_DAY)
+    )
+
+
+def resolve_noncommute_trip_overlaps(trip_pool: pd.DataFrame) -> pd.DataFrame:
+    """Drop conflicting non-commute trips using a deterministic priority rule.
+
+    Within each vehicle-day, longer home-to-home away intervals take priority.
+    Equal-duration intervals are prioritized by earlier start time. Exact ties
+    retain source order so repeated runs remain deterministic.
+    """
+    resolved = trip_pool.reset_index(drop=True).copy()
+    dropped_records = []
+    required = {
+        "vehicle_case_id",
+        "day_of_week",
+        "trip_type",
+        "trip_start_time",
+        "trip_end_time",
+    }
+    if resolved.empty or not required.issubset(resolved.columns):
+        resolved.attrs["dropped_overlapping_trips"] = pd.DataFrame()
+        return resolved
+
+    dropped_indices = set()
+    noncommute = resolved.loc[resolved["trip_type"] == "noncommute"]
+    groups = noncommute.groupby(
+        ["vehicle_case_id", "day_of_week"], sort=False, dropna=False
+    )
+
+    for _, group in groups:
+        ranked = []
+        for source_order, (index, trip) in enumerate(group.iterrows()):
+            interval = _trip_interval_seconds(trip)
+            ranked.append(
+                {
+                    "index": index,
+                    "source_order": source_order,
+                    "trip": trip,
+                    "interval": interval,
+                    "duration_seconds": interval[1] - interval[0],
+                }
+            )
+
+        ranked.sort(
+            key=lambda candidate: (
+                -candidate["duration_seconds"],
+                candidate["interval"][0],
+                candidate["source_order"],
+            )
+        )
+
+        retained = []
+        for candidate in ranked:
+            conflicts = [
+                kept
+                for kept in retained
+                if _clock_intervals_overlap(candidate["interval"], kept["interval"])
+            ]
+            if not conflicts:
+                retained.append(candidate)
+                continue
+
+            # Retained candidates are already ordered by the priority rule.
+            kept = conflicts[0]
+            dropped_indices.add(candidate["index"])
+            dropped = candidate["trip"].to_dict()
+            dropped.update(
+                {
+                    "drop_reason": "overlaps retained noncommute trip",
+                    "away_duration_minutes": candidate["duration_seconds"] / 60,
+                    "retained_trip_start_time": kept["trip"]["trip_start_time"],
+                    "retained_trip_end_time": kept["trip"]["trip_end_time"],
+                    "retained_away_duration_minutes": kept["duration_seconds"] / 60,
+                }
+            )
+            dropped_records.append(dropped)
+
+    if dropped_indices:
+        resolved = resolved.drop(index=sorted(dropped_indices)).reset_index(drop=True)
+    resolved.attrs["dropped_overlapping_trips"] = pd.DataFrame(dropped_records)
+    return resolved
+
+
 def build_trip_pool(path: Path, cdivmsar_target: int):
     df = load_and_filter_nhts(path, cdivmsar_target)
     groups = group_by_vehicle_day(df)
@@ -163,7 +271,7 @@ def build_trip_pool(path: Path, cdivmsar_target: int):
         chunks = chunk_round_trips(trips)
         for chunk in chunks:
             trip_rows.append(summarize_chunk(chunk))
-    return pd.DataFrame(trip_rows)
+    return resolve_noncommute_trip_overlaps(pd.DataFrame(trip_rows))
 
 def determine_commute(ev, trip_pool, is_weekend, rng, commute_cache):
     # If cached, return base commute (no noise)
@@ -572,6 +680,11 @@ def _equipment_overrides(
     neighborhood: NeighborhoodConfig,
     rng,
     *,
+    water_nodes: int | None = None,
+    water_heater_hp_only: bool = False,
+    evs: tuple[EVConfig, ...] | None = None,
+    ev_event_schedules: Mapping[str, pd.DataFrame] | None = None,
+    write_ev_diagnostics: bool = True,
     defrost_model: str = "Legacy",
     defrost_control_type: str = "Auto",
     defrost_er_strategy: str = "Aggressive",
@@ -589,52 +702,94 @@ def _equipment_overrides(
         "Defrost Control Type": defrost_control_type,
         "Defrost ER Strategy": defrost_er_strategy,
     }
+    cooler = {
+        "Deadband Temperature (C)": home.cooling_deadband_c,
+        "Deadband Offset (C)": home.cooling_deadband_offset,
+    }
 
     if home.backup_number_of_stages is not None:
         heater["Number of Backup Stages (-)"] = home.backup_number_of_stages
 
     if home.backup_stage_capacities_kw is not None:
-        heater["Backup Stage Capacities (W)"] = [
-            kw * 1000 for kw in home.backup_stage_capacities_kw
-        ]
+        if isinstance(home.backup_stage_capacities_kw, float):
+            heater["Backup Capacity (W)"] = home.backup_stage_capacities_kw * 1000
+        else:
+            heater["Backup Stage Capacities (W)"] = [
+                kw * 1000 for kw in home.backup_stage_capacities_kw
+            ]
 
-    # --- EV schedule integration
+    configured_evs = home.evs if evs is None else tuple(evs)
+    ev_equipment = {}
+    water_heating = {"Setpoint Temperature (C)": home.water_heater_setpoint_c}
+    if home.water_heater_deadband_c is not None:
+        water_heating["Deadband Temperature (C)"] = home.water_heater_deadband_c
+    if water_nodes is not None:
+        water_heating["water_nodes"] = water_nodes
+    if water_heater_hp_only:
+        water_heating["hp_only_mode"] = True
 
-    trip_pool = build_trip_pool(
-        neighborhood.ev_trip_file,
-        neighborhood.NHTS_location_CDIVMSAR_ID,
-    )
+    if not configured_evs:
+        return {
+            "ASHP Heater": heater,
+            "ASHP Cooler": cooler,
+            "Water Heating": water_heating,
+        }
 
-    weather_by_mdhm = _load_weather_raw(neighborhood.weather_file)
+    if ev_event_schedules is not None and write_ev_diagnostics:
+        raise ValueError(
+            "Prebuilt EV schedules cannot produce trip diagnostics; "
+            "set write_ev_diagnostics=False"
+        )
+
+    trip_pool = None
+    weather_by_mdhm = None
+    if ev_event_schedules is None:
+        trip_pool = build_trip_pool(
+            neighborhood.ev_trip_file,
+            neighborhood.NHTS_location_CDIVMSAR_ID,
+        )
+        weather_by_mdhm = _load_weather_raw(neighborhood.weather_file)
 
     from ochre.Equipment import ElectricVehicle
 
-    ev_equipment = {}
+    output_dir = None
+    if write_ev_diagnostics and trip_pool is not None:
+        output_dir = neighborhood.output_directory / "data" / "raw" / home.home_id
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Output directory for this home
-    output_dir = neighborhood.output_directory / "data" / "raw" / home.home_id
-    output_dir.mkdir(parents=True, exist_ok=True)
+        trip_pool.to_csv(output_dir / "trip_pool.csv", index=False)
+        dropped_overlaps = trip_pool.attrs.get("dropped_overlapping_trips")
+        if isinstance(dropped_overlaps, pd.DataFrame) and not dropped_overlaps.empty:
+            dropped_overlaps.to_csv(
+                output_dir / "trip_pool_dropped_overlaps.csv", index=False
+            )
 
-    # Export log of trip_pool for this home
-    trip_pool.to_csv(output_dir / "trip_pool.csv", index=False)
+    for ev in configured_evs:
+        if ev_event_schedules is not None:
+            try:
+                ev_sched = ev_event_schedules[ev.vehicle_id].copy(deep=True)
+            except KeyError as exc:
+                raise ValueError(
+                    f"Missing prebuilt schedule for EV {ev.vehicle_id!r}"
+                ) from exc
+        else:
+            ev_sched, ev_log = build_ev_multiday_schedule(
+                ev,
+                neighborhood,
+                trip_pool,
+                weather_by_mdhm,
+                rng,
+            )
 
-    for ev in home.evs:
-        ev_sched, ev_log = build_ev_multiday_schedule(
-            ev,
-            neighborhood,
-            trip_pool,
-            weather_by_mdhm,
-            rng,
-        )
-
-        # Export log of ev schedule
-        (ev_log).to_csv(output_dir / f"EV_{ev.vehicle_id}_log.csv", index=False)
+            if output_dir is not None:
+                ev_log.to_csv(output_dir / f"EV_{ev.vehicle_id}_log.csv", index=False)
 
         ev_equipment[f"EV_{ev.vehicle_id}"] = {
             "equipment_class": ElectricVehicle,
 
-            # Each EV must have its own end-use category
-            "end_use": f"EV_{ev.vehicle_id}",
+            # Keep the common EV end use for aggregation and group controls,
+            # while publishing collision-free per-vehicle result columns.
+            "results_name": f"EV_{ev.vehicle_id}",
 
             # Required EV constructor args
             "vehicle_type": "BEV",
@@ -648,16 +803,32 @@ def _equipment_overrides(
 
     return {
         "ASHP Heater": heater,
-        "Water Heating": {"Setpoint Temperature (C)": home.water_heater_setpoint_c},
+        "ASHP Cooler": cooler,
+        "Water Heating": water_heating,
         **ev_equipment,
     }
 
 
-def _set_thermostats(dwelling: Dwelling, home: HomeConfig) -> None:
+def _set_thermostats(
+    dwelling: Dwelling,
+    home: HomeConfig,
+    *,
+    heating_setpoint_c: float | None = None,
+    cooling_setpoint_c: float | None = None,
+) -> None:
+    """Apply configured setpoints, optionally replacing either seasonal value."""
     heater = dwelling.get_equipment_by_end_use("HVAC Heating")
     cooler = dwelling.get_equipment_by_end_use("HVAC Cooling")
-    heater.schedule.loc[:, "HVAC Heating Setpoint (C)"] = home.heating_setpoint_c
-    cooler.schedule.loc[:, "HVAC Cooling Setpoint (C)"] = home.cooling_setpoint_c
+    heater.schedule.loc[:, "HVAC Heating Setpoint (C)"] = (
+        home.heating_setpoint_c
+        if heating_setpoint_c is None
+        else heating_setpoint_c
+    )
+    cooler.schedule.loc[:, "HVAC Cooling Setpoint (C)"] = (
+        home.cooling_setpoint_c
+        if cooling_setpoint_c is None
+        else cooling_setpoint_c
+    )
     heater.reset_time()
     cooler.reset_time()
 
@@ -701,8 +872,18 @@ def create_dwelling(
     neighborhood: NeighborhoodConfig,
     home: HomeConfig,
     raw_output_directory: Path,
+    *,
+    water_nodes: int | None = None,
+    water_heater_hp_only: bool = False,
+    initial_temp_setpoint: float | None = None,
 ) -> Dwelling:
-    """Instantiate one configured OCHRE dwelling using local repository inputs."""
+    """Create a dwelling; None retains OCHRE's randomized indoor temperature."""
+    if water_nodes is not None and (
+        isinstance(water_nodes, bool)
+        or not isinstance(water_nodes, int)
+        or water_nodes < 1
+    ):
+        raise ValueError("water_nodes must be a positive integer")
     rng = np.random.default_rng(neighborhood.random_seed + home.seed_offset)
     raw_output_directory.mkdir(parents=True, exist_ok=True)
     dwelling = Dwelling(
@@ -711,6 +892,7 @@ def create_dwelling(
         duration=neighborhood.duration,
         time_res=neighborhood.time_step,
         initialization_time=neighborhood.initialization_time,
+        initial_temp_setpoint=initial_temp_setpoint,
         hpxml_file=str(home.hpxml_file),
         hpxml_schedule_file=str(home.schedule_file),
         weather_file=str(neighborhood.weather_file),
@@ -724,6 +906,8 @@ def create_dwelling(
             home,
             neighborhood,
             rng,
+            water_nodes=water_nodes,
+            water_heater_hp_only=water_heater_hp_only,
             defrost_model=neighborhood.defrost_model,
             defrost_control_type=neighborhood.defrost_control_type,
             defrost_er_strategy=neighborhood.defrost_er_strategy,

@@ -1,0 +1,115 @@
+{
+  "schema_version": 2,
+  "model_type": "all_feature_exogenous_state_space",
+  "columns": {
+    "input": [
+      "water_heater_delivered_heat_kw"
+    ],
+    "outputs": [
+      "water_heater_sensor_node_03_temperature_c",
+      "water_heater_sensor_node_10_temperature_c"
+    ],
+    "disturbances": [
+      "water_heater_draw_l_per_min",
+      "water_heater_mains_temperature_c",
+      "water_heater_tank_ambient_temperature_c"
+    ]
+  },
+  "sensor_layout": {
+    "model_nodes": 12,
+    "node_order": "top_to_bottom",
+    "height_reference": "fraction_from_tank_bottom_to_node_center",
+    "sensors": [
+      {
+        "node": 3,
+        "height_fraction_from_bottom": 0.7916666666666666,
+        "column": "water_heater_sensor_node_03_temperature_c"
+      },
+      {
+        "node": 10,
+        "height_fraction_from_bottom": 0.20833333333333334,
+        "column": "water_heater_sensor_node_10_temperature_c"
+      }
+    ]
+  },
+  "configuration": {
+    "source_timestep_seconds": 60.0,
+    "model_timestep_seconds": 900.0,
+    "prediction_horizon_seconds": 43200.0,
+    "horizon_steps": 48,
+    "memory_min": 1,
+    "memory_max": 12,
+    "feature_selection_method": "none",
+    "scaling": "none",
+    "lambda_grid_mode": null,
+    "auto_lambda_grid_points": null,
+    "relative_aicc_threshold": 0.05,
+    "group_lasso_solver": null,
+    "cvxpy_solver": null,
+    "lambda_selection_metric": null,
+    "memory_selection_metric": "relative_AICc"
+  },
+  "selection": {
+    "memory": 7,
+    "standard_aicc_memory": 7,
+    "relative_aicc_memory": 7,
+    "lambda": null,
+    "lambda_grid": [],
+    "selected_disturbances": [
+      "water_heater_draw_l_per_min",
+      "water_heater_mains_temperature_c",
+      "water_heater_tank_ambient_temperature_c"
+    ],
+    "validation_rmse_c": null
+  },
+  "windows": {
+    "training": {
+      "start": "2018-01-01T00:00:00",
+      "end": "2018-01-09T00:00:00"
+    },
+    "validation": {
+      "start": "2018-01-09T00:00:00",
+      "end": "2018-01-11T00:00:00"
+    },
+    "test": {
+      "start": "2018-01-11T00:00:00",
+      "end": "2018-01-15T00:00:00"
+    }
+  },
+  "test_metrics": {
+    "one_step_rmse_c": {
+      "water_heater_sensor_node_03_temperature_c": 0.1632179293428499,
+      "water_heater_sensor_node_10_temperature_c": 0.5662543117447733
+    },
+    "one_step_combined_rmse_c": 0.4167037544998331,
+    "rolling_horizon_rmse_c": {
+      "water_heater_sensor_node_03_temperature_c": 1.219569559219392,
+      "water_heater_sensor_node_10_temperature_c": 2.2821097834081026
+    },
+    "rolling_horizon_combined_rmse_c": 1.8296686822074588,
+    "one_step_prediction_count": 377,
+    "rolling_horizon_origin_count": 330
+  },
+  "diagnostic_outputs": {
+    "figure_directory": "figures",
+    "figures": [
+      "three_split_predictions.png",
+      "residual_diagnostics.png",
+      "rmse_by_horizon.png",
+      "measured_vs_predicted.png",
+      "memory_selection.png",
+      "lambda_selection.png",
+      "selected_disturbances.png"
+    ],
+    "csv_files": [
+      "predictions.csv",
+      "residuals.csv",
+      "rmse_by_horizon.csv",
+      "memory_selection.csv",
+      "lambda_selection.csv",
+      "selected_disturbances.csv",
+      "heat_reconstruction.csv"
+    ]
+  },
+  "regularization_summary": {}
+}

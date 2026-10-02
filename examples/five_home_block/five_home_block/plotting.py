@@ -138,10 +138,22 @@ def plot_home_states(data: pd.DataFrame, home_id: str, output_file: Path, dpi: i
     axes[0].set_title(f"{home_id}: state variables")
     axes[0].legend(ncol=3)
 
-    axes[1].plot(data.index, data["ev_soc_fraction"], color="tab:green", label="EV SOC")
+    per_ev_soc_fields = [
+        column
+        for column in data.columns
+        if column.startswith("ev_") and column.endswith("_soc_fraction")
+    ]
+    soc_fields = per_ev_soc_fields or (
+        ["ev_soc_fraction"] if "ev_soc_fraction" in data else []
+    )
+    for field in soc_fields:
+        vehicle = field.removeprefix("ev_").removesuffix("_soc_fraction")
+        label = "EV SOC" if field == "ev_soc_fraction" else f"EV {vehicle} SOC"
+        axes[1].plot(data.index, data[field], label=label)
     axes[1].set_ylabel("EV SOC (fraction)")
     axes[1].set_ylim(-0.02, 1.02)
-    axes[1].legend()
+    if soc_fields:
+        axes[1].legend()
 
     axes[2].plot(
         data.index,

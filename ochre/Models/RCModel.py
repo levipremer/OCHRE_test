@@ -102,7 +102,12 @@ class RCModel(StateSpaceModel):
         all_nodes = set([node for name in all_res.keys() for node in name])
 
         # remove floating nodes using star-mesh transform
-        floating_nodes = [node for node in all_nodes if node not in internal_nodes + external_nodes]
+        # A stable elimination order is required because star-mesh transforms are
+        # order-sensitive at floating-point precision. Iterating the set directly
+        # made otherwise seeded simulations depend on Python's per-process hash seed.
+        floating_nodes = sorted(
+            node for node in all_nodes if node not in internal_nodes + external_nodes
+        )
         for node in floating_nodes:
             all_res = transform_floating_node(node, all_res)
 

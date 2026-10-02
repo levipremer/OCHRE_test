@@ -333,31 +333,31 @@ class ElectricVehicle(EventBasedLoad):
             baseline_power = 0
 
         return {
-            f"{self.end_use} EBM Energy (kWh)": self.soc * self.capacity,
-            f"{self.end_use} EBM Min Energy (kWh)": 0,
-            f"{self.end_use} EBM Max Energy (kWh)": self.capacity,
-            f"{self.end_use} EBM Max Power (kW)": self.max_power,
-            f"{self.end_use} EBM Efficiency (-)": EV_EFFICIENCY,
-            f"{self.end_use} EBM Baseline Power (kW)": baseline_power,
+            f"{self.results_name} EBM Energy (kWh)": self.soc * self.capacity,
+            f"{self.results_name} EBM Min Energy (kWh)": 0,
+            f"{self.results_name} EBM Max Energy (kWh)": self.capacity,
+            f"{self.results_name} EBM Max Power (kW)": self.max_power,
+            f"{self.results_name} EBM Efficiency (-)": EV_EFFICIENCY,
+            f"{self.results_name} EBM Baseline Power (kW)": baseline_power,
         }
 
     def generate_results(self):
         results = super().generate_results()
 
         if self.verbosity >= 3:
-            results[f"{self.end_use} SOC (-)"] = self.soc
-            results[f"{self.end_use} Unmet Load (kWh)"] = self.unmet_load
+            results[f"{self.results_name} SOC (-)"] = self.soc
+            results[f"{self.results_name} Unmet Load (kWh)"] = self.unmet_load
         if self.verbosity >= 4:
-            results[f"{self.end_use} Parked"] = self.in_event
+            results[f"{self.results_name} Parked"] = self.in_event
         if self.verbosity >= 7:
-            # results[f'{self.end_use} Setpoint Power (kW)'] = self.setpoint_power or 0
-            results[f"{self.end_use} Start Time"] = self.event_start
-            results[f"{self.end_use} End Time"] = self.event_end
+            # results[f'{self.results_name} Setpoint Power (kW)'] = self.setpoint_power or 0
+            results[f"{self.results_name} Start Time"] = self.event_start
+            results[f"{self.results_name} End Time"] = self.event_end
         if self.verbosity >= 7:
             remaining_charge_minutes = (
                 (1 - self.soc) * self.capacity / (self.max_power_ctrl * EV_EFFICIENCY) * 60
             )
-            results[f"{self.end_use} Remaining Charge Time (min)"] = remaining_charge_minutes
+            results[f"{self.results_name} Remaining Charge Time (min)"] = remaining_charge_minutes
         return results
 
     def update_results(self):

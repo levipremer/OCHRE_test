@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass
 
@@ -38,15 +39,22 @@ SINGLE_COLUMN_CANDIDATES: dict[str, tuple[str, ...]] = {
         "Temperature - Indoor (C)",
         "Indoor Temperature (C)",
     ),
-    "ev_soc_fraction": (
-        "EV SOC (-)",
-        "Electric Vehicle SOC (-)",
-    ),
     "water_heater_temperature_c": (
         "Hot Water Average Temperature (C)",
         "Water Heating Average Temperature (C)",
         "Hot Water Outlet Temperature (C)",
     ),
+}
+
+LEGACY_EV_SOC_COLUMNS = (
+    "EV SOC (-)",
+    "Electric Vehicle SOC (-)",
+)
+
+PER_EV_RESULT_FIELDS = {
+    "Electric Power (kW)": "power_kw",
+    "SOC (-)": "soc_fraction",
+    "Unmet Load (kWh)": "unmet_load_kwh",
 }
 
 OPTIONAL_COLUMN_CANDIDATES: dict[str, tuple[str, ...]] = {
@@ -59,6 +67,29 @@ OPTIONAL_COLUMN_CANDIDATES: dict[str, tuple[str, ...]] = {
 
 def _find_column(columns: pd.Index, candidates: tuple[str, ...]) -> str | None:
     return next((candidate for candidate in candidates if candidate in columns), None)
+
+
+def find_per_ev_columns(columns: pd.Index, suffix: str) -> dict[str, str]:
+    """Map normalized vehicle IDs to uniquely prefixed OCHRE result columns."""
+    ending = f" {suffix}"
+    matches: dict[str, str] = {}
+    for column in columns:
+        if not isinstance(column, str) or not column.startswith("EV_"):
+            continue
+        if not column.endswith(ending):
+            continue
+        vehicle_id = column[len("EV_") : -len(ending)]
+        normalized = re.sub(r"[^a-z0-9]+", "_", vehicle_id.lower()).strip("_")
+        if not normalized:
+            raise OutputMappingError(f"Invalid per-EV result column: {column!r}")
+        previous = matches.get(normalized)
+        if previous is not None:
+            raise OutputMappingError(
+                f"Per-EV result columns {previous!r} and {column!r} normalize "
+                f"to the same vehicle ID {normalized!r}"
+            )
+        matches[normalized] = column
+    return matches
 
 
 def _required_column(results: pd.DataFrame, field: str) -> str:
@@ -120,6 +151,46 @@ def standardize_results(
         if column is not None:
             standardized[field] = pd.to_numeric(results[column], errors="raise")
             selected[field] = [column]
+
+    per_ev_fields: dict[str, list[str]] = {
+        standardized_suffix: []
+        for standardized_suffix in PER_EV_RESULT_FIELDS.values()
+    }
+    for result_suffix, standardized_suffix in PER_EV_RESULT_FIELDS.items():
+        for vehicle_id, source in find_per_ev_columns(results.columns, result_suffix).items():
+            field = f"ev_{vehicle_id}_{standardized_suffix}"
+            standardized[field] = pd.to_numeric(results[source], errors="raise")
+            selected[field] = [source]
+            per_ev_fields[standardized_suffix].append(field)
+
+    per_ev_soc_fields = per_ev_fields["soc_fraction"]
+    if len(per_ev_soc_fields) == 1:
+        standardized["ev_soc_fraction"] = standardized[per_ev_soc_fields[0]]
+        selected["ev_soc_fraction"] = [
+            f"alias: {selected[per_ev_soc_fields[0]][0]}"
+        ]
+    elif not per_ev_soc_fields:
+        legacy_soc = _find_column(results.columns, LEGACY_EV_SOC_COLUMNS)
+        if legacy_soc is None:
+            raise OutputMappingError(
+                "Cannot map EV SOC. Expected a uniquely prefixed per-EV SOC column "
+                f"or one of {list(LEGACY_EV_SOC_COLUMNS)}. Available OCHRE columns: "
+                f"{results.columns.tolist()}"
+            )
+        standardized["ev_soc_fraction"] = pd.to_numeric(
+            results[legacy_soc], errors="raise"
+        )
+        selected["ev_soc_fraction"] = [legacy_soc]
+
+    per_ev_power_fields = per_ev_fields["power_kw"]
+    if per_ev_power_fields:
+        per_ev_total = standardized[per_ev_power_fields].sum(axis=1)
+        maximum_error = (standardized["ev_power_kw"] - per_ev_total).abs().max()
+        if maximum_error > numerical_tolerance_kw:
+            raise OutputMappingError(
+                f"{home_id}: aggregate EV power differs from the sum of per-EV "
+                f"power by up to {maximum_error:.6g} kW"
+            )
 
     standardized["rest_of_home_power_kw"] = (
         standardized["total_electric_power_kw"]

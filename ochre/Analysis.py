@@ -492,10 +492,43 @@ def calculate_metrics(results=None, results_file=None, dwelling=None, metrics_ve
 
     # EV metrics
     if metrics_verbosity >= 4 and "EV Electric Power (kW)" in results:
+        ev_soc_columns = [
+            column
+            for column in results
+            if column.startswith("EV_") and column.endswith(" SOC (-)")
+        ]
         if "EV SOC (-)" in results:
             metrics["Average EV SOC (-)"] = results["EV SOC (-)"].mean(skipna=False)
+        elif len(ev_soc_columns) == 1:
+            metrics["Average EV SOC (-)"] = results[ev_soc_columns[0]].mean(
+                skipna=False
+            )
+        for column in ev_soc_columns:
+            results_name = column.removesuffix(" SOC (-)")
+            metrics[f"Average {results_name} SOC (-)"] = results[column].mean(
+                skipna=False
+            )
+
         if "EV Unmet Load (kWh)" in results:
-            metrics["Total EV Unmet Load (kWh)"] = results["EV Unmet Load (kWh)"].sum(skipna=False)
+            metrics["Total EV Unmet Load (kWh)"] = results[
+                "EV Unmet Load (kWh)"
+            ].sum(skipna=False)
+        else:
+            ev_unmet_columns = [
+                column
+                for column in results
+                if column.startswith("EV_")
+                and column.endswith(" Unmet Load (kWh)")
+            ]
+            if ev_unmet_columns:
+                metrics["Total EV Unmet Load (kWh)"] = results[
+                    ev_unmet_columns
+                ].sum(axis=1, skipna=False).sum(skipna=False)
+                for column in ev_unmet_columns:
+                    results_name = column.removesuffix(" Unmet Load (kWh)")
+                    metrics[f"Total {results_name} Unmet Load (kWh)"] = results[
+                        column
+                    ].sum(skipna=False)
 
     # Battery metrics
     if metrics_verbosity >= 4 and "Battery Electric Power (kW)" in results:

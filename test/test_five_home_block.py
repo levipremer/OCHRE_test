@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -24,7 +25,11 @@ from examples.five_home_block.five_home_block.output_mapping import (
     OutputMappingError,
     standardize_results,
 )
-from examples.five_home_block.five_home_block.home_factory import _equipment_overrides
+from examples.five_home_block.five_home_block.home_factory import (
+    _equipment_overrides,
+    create_dwelling,
+    resolve_noncommute_trip_overlaps,
+)
 from examples.five_home_block.five_home_block.plotting import (
     plot_home_power,
     plot_home_states,
@@ -32,6 +37,7 @@ from examples.five_home_block.five_home_block.plotting import (
     plot_weather,
 )
 from examples.five_home_block.five_home_block.transformer import DistributionTransformer
+from ochre.Analysis import calculate_metrics
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +63,103 @@ def make_raw_results(scale: float = 1.0) -> pd.DataFrame:
         },
         index=index,
     )
+
+
+class EVTripPoolTests(unittest.TestCase):
+    def test_longer_noncommute_trip_wins_overlap(self) -> None:
+        trip_pool = pd.DataFrame(
+            [
+                {
+                    "marker": "long",
+                    "vehicle_case_id": "vehicle_1",
+                    "day_of_week": 3,
+                    "trip_type": "noncommute",
+                    "trip_start_time": pd.Timestamp("2018-01-01 18:15").time(),
+                    "trip_end_time": pd.Timestamp("2018-01-01 22:05").time(),
+                },
+                {
+                    "marker": "short",
+                    "vehicle_case_id": "vehicle_1",
+                    "day_of_week": 3,
+                    "trip_type": "noncommute",
+                    "trip_start_time": pd.Timestamp("2018-01-01 19:00").time(),
+                    "trip_end_time": pd.Timestamp("2018-01-01 19:15").time(),
+                },
+            ]
+        )
+
+        resolved = resolve_noncommute_trip_overlaps(trip_pool)
+
+        self.assertEqual(resolved["marker"].tolist(), ["long"])
+        dropped = resolved.attrs["dropped_overlapping_trips"]
+        self.assertEqual(dropped["marker"].tolist(), ["short"])
+        self.assertEqual(
+            dropped.loc[0, "retained_trip_start_time"],
+            pd.Timestamp("2018-01-01 18:15").time(),
+        )
+
+    def test_earlier_start_wins_equal_duration_overlap(self) -> None:
+        trip_pool = pd.DataFrame(
+            [
+                {
+                    "marker": "later",
+                    "vehicle_case_id": "vehicle_1",
+                    "day_of_week": 3,
+                    "trip_type": "noncommute",
+                    "trip_start_time": pd.Timestamp("2018-01-01 13:30").time(),
+                    "trip_end_time": pd.Timestamp("2018-01-01 15:30").time(),
+                },
+                {
+                    "marker": "earlier",
+                    "vehicle_case_id": "vehicle_1",
+                    "day_of_week": 3,
+                    "trip_type": "noncommute",
+                    "trip_start_time": pd.Timestamp("2018-01-01 13:00").time(),
+                    "trip_end_time": pd.Timestamp("2018-01-01 15:00").time(),
+                },
+            ]
+        )
+
+        resolved = resolve_noncommute_trip_overlaps(trip_pool)
+
+        self.assertEqual(resolved["marker"].tolist(), ["earlier"])
+        dropped = resolved.attrs["dropped_overlapping_trips"]
+        self.assertEqual(dropped["marker"].tolist(), ["later"])
+
+    def test_nonoverlapping_and_commute_trips_are_unchanged(self) -> None:
+        trip_pool = pd.DataFrame(
+            [
+                {
+                    "marker": "morning",
+                    "vehicle_case_id": "vehicle_1",
+                    "day_of_week": 3,
+                    "trip_type": "noncommute",
+                    "trip_start_time": pd.Timestamp("2018-01-01 08:00").time(),
+                    "trip_end_time": pd.Timestamp("2018-01-01 09:00").time(),
+                },
+                {
+                    "marker": "evening",
+                    "vehicle_case_id": "vehicle_1",
+                    "day_of_week": 3,
+                    "trip_type": "noncommute",
+                    "trip_start_time": pd.Timestamp("2018-01-01 18:00").time(),
+                    "trip_end_time": pd.Timestamp("2018-01-01 19:00").time(),
+                },
+                {
+                    "marker": "commute",
+                    "vehicle_case_id": "vehicle_1",
+                    "day_of_week": 3,
+                    "trip_type": "commute",
+                    "trip_start_time": pd.Timestamp("2018-01-01 08:30").time(),
+                    "trip_end_time": pd.Timestamp("2018-01-01 18:30").time(),
+                },
+            ]
+        )
+
+        resolved = resolve_noncommute_trip_overlaps(trip_pool)
+
+        self.assertEqual(resolved["marker"].tolist(), trip_pool["marker"].tolist())
+        self.assertTrue(resolved.attrs["dropped_overlapping_trips"].empty)
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -104,15 +207,22 @@ class ConfigurationTests(unittest.TestCase):
         config = load_configuration(CONFIG_DIRECTORY, repo_root=REPO_ROOT)
         forbidden_sizing_fields = {
             "Capacity (W)",
-            "Backup Capacity (W)",
             "Tank Volume (L)",
             "HPWH Capacity (W)",
             "HPWH Power (W)",
         }
         for home in config.homes:
+            # Exercise the optional override with a fixed test input, independent
+            # of the operating deadband selected in the example configuration.
+            home = replace(
+                home,
+                water_heater_deadband_c=2.75 if home.home_id == "home_01" else None,
+            )
             overrides = _equipment_overrides(
                 home,
-                config.start_time,
+                config,
+                np.random.default_rng(config.random_seed + home.seed_offset),
+                evs=(),
                 defrost_model=config.defrost_model,
                 defrost_control_type=config.defrost_control_type,
             )
@@ -123,6 +233,14 @@ class ConfigurationTests(unittest.TestCase):
                 )
             self.assertEqual(overrides["ASHP Heater"]["Deadband Temperature (C)"], 1.5)
             self.assertEqual(overrides["ASHP Heater"]["Deadband Offset (C)"], 0.5)
+            self.assertEqual(overrides["ASHP Cooler"]["Deadband Temperature (C)"], 1.5)
+            self.assertEqual(overrides["ASHP Cooler"]["Deadband Offset (C)"], 0.5)
+            if home.home_id == "home_01":
+                self.assertEqual(
+                    overrides["Water Heating"]["Deadband Temperature (C)"], 2.75
+                )
+            else:
+                self.assertNotIn("Deadband Temperature (C)", overrides["Water Heating"])
             self.assertEqual(
                 overrides["ASHP Heater"]["Compressor Minimum On Time (minutes)"], 15
             )
@@ -139,8 +257,18 @@ class ConfigurationTests(unittest.TestCase):
                 overrides["ASHP Heater"]["Backup Stage Escalation Delay (minutes)"],
                 10,
             )
-            self.assertNotIn("Number of Backup Stages (-)", overrides["ASHP Heater"])
+            if home.backup_number_of_stages is None:
+                self.assertNotIn("Number of Backup Stages (-)", overrides["ASHP Heater"])
+            else:
+                self.assertEqual(
+                    overrides["ASHP Heater"]["Number of Backup Stages (-)"],
+                    home.backup_number_of_stages,
+                )
             self.assertNotIn("Backup Stage Capacities (W)", overrides["ASHP Heater"])
+            self.assertEqual(
+                overrides["ASHP Heater"]["Backup Capacity (W)"],
+                home.backup_stage_capacities_kw * 1000,
+            )
             self.assertEqual(overrides["ASHP Heater"]["Defrost Model"], "Discrete")
             self.assertEqual(overrides["ASHP Heater"]["Defrost Control Type"], "Auto")
             self.assertEqual(
@@ -156,7 +284,9 @@ class ConfigurationTests(unittest.TestCase):
         )
         overrides = _equipment_overrides(
             home,
-            config.start_time,
+            config,
+            np.random.default_rng(config.random_seed + home.seed_offset),
+            evs=(),
             defrost_model=config.defrost_model,
             defrost_control_type=config.defrost_control_type,
         )
@@ -179,7 +309,110 @@ class OutputMappingTests(unittest.TestCase):
         with self.assertRaises(OutputMappingError) as context:
             standardize_results(raw, "test_home")
         self.assertIn("Available OCHRE columns", str(context.exception))
-        self.assertIn("ev_soc_fraction", str(context.exception))
+        self.assertIn("Cannot map EV SOC", str(context.exception))
+
+    def test_maps_and_validates_multiple_ev_result_columns(self) -> None:
+        raw = make_raw_results().drop(columns="EV SOC (-)")
+        raw["EV_01A Electric Power (kW)"] = 0.4
+        raw["EV_01B Electric Power (kW)"] = 0.6
+        raw["EV_01A SOC (-)"] = 0.3
+        raw["EV_01B SOC (-)"] = 0.7
+        raw["EV_01A Unmet Load (kWh)"] = 0.0
+        raw["EV_01B Unmet Load (kWh)"] = 0.0
+
+        mapped = standardize_results(raw, "test_home").data
+
+        self.assertTrue((mapped["ev_01a_power_kw"] == 0.4).all())
+        self.assertTrue((mapped["ev_01b_power_kw"] == 0.6).all())
+        self.assertTrue((mapped["ev_01a_soc_fraction"] == 0.3).all())
+        self.assertTrue((mapped["ev_01b_soc_fraction"] == 0.7).all())
+        self.assertNotIn("ev_soc_fraction", mapped)
+
+        single_ev = raw.drop(
+            columns=[
+                "EV_01B Electric Power (kW)",
+                "EV_01B SOC (-)",
+                "EV_01B Unmet Load (kWh)",
+            ]
+        ).copy()
+        single_ev["EV Electric Power (kW)"] = single_ev[
+            "EV_01A Electric Power (kW)"
+        ]
+        single_mapped = standardize_results(single_ev, "test_home").data
+        self.assertTrue(
+            single_mapped["ev_soc_fraction"].equals(
+                single_mapped["ev_01a_soc_fraction"]
+            )
+        )
+
+        raw["EV Electric Power (kW)"] = 1.1
+        with self.assertRaisesRegex(OutputMappingError, "aggregate EV power"):
+            standardize_results(raw, "test_home")
+
+
+class MultiEVOutputTests(unittest.TestCase):
+    def test_two_ev_dwelling_preserves_aggregate_and_per_vehicle_results(self) -> None:
+        config = load_configuration(CONFIG_DIRECTORY, repo_root=REPO_ROOT)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_directory = Path(temporary_directory)
+            short_config = replace(
+                config,
+                duration=dt.timedelta(minutes=2),
+                output_directory=output_directory,
+            )
+            dwelling = create_dwelling(
+                short_config,
+                short_config.homes[1],
+                output_directory / "raw",
+            )
+            raw, _, _ = dwelling.simulate()
+
+        per_ev_power_columns = [
+            "EV_02_A Electric Power (kW)",
+            "EV_02_B Electric Power (kW)",
+        ]
+        self.assertEqual(len(dwelling.equipment_by_end_use["EV"]), 2)
+        self.assertTrue(
+            np.allclose(
+                raw["EV Electric Power (kW)"],
+                raw[per_ev_power_columns].sum(axis=1),
+            )
+        )
+        self.assertIn("EV_02_A SOC (-)", raw)
+        self.assertIn("EV_02_B SOC (-)", raw)
+        self.assertNotIn("EV SOC (-)", raw)
+
+        standardized = standardize_results(raw, "home_02").data
+        self.assertTrue(
+            np.allclose(
+                standardized["ev_power_kw"],
+                standardized[["ev_02_a_power_kw", "ev_02_b_power_kw"]].sum(axis=1),
+            )
+        )
+        self.assertLessEqual(maximum_power_balance_error(standardized), 1e-12)
+
+    def test_two_ev_metrics_include_aggregate_and_per_vehicle_values(self) -> None:
+        index = pd.date_range("2018-01-01", periods=2, freq="1h")
+        results = pd.DataFrame(
+            {
+                "Total Electric Power (kW)": [3.0, 4.0],
+                "EV Electric Power (kW)": [1.0, 2.0],
+                "EV_01A SOC (-)": [0.4, 0.6],
+                "EV_01B SOC (-)": [0.5, 0.7],
+                "EV_01A Unmet Load (kWh)": [0.0, -0.2],
+                "EV_01B Unmet Load (kWh)": [-0.1, 0.0],
+            },
+            index=index,
+        )
+
+        metrics = calculate_metrics(results, metrics_verbosity=4)
+
+        self.assertNotIn("Average EV SOC (-)", metrics)
+        self.assertAlmostEqual(metrics["Average EV_01A SOC (-)"], 0.5)
+        self.assertAlmostEqual(metrics["Average EV_01B SOC (-)"], 0.6)
+        self.assertAlmostEqual(metrics["Total EV Unmet Load (kWh)"], -0.3)
+        self.assertAlmostEqual(metrics["Total EV_01A Unmet Load (kWh)"], -0.2)
+        self.assertAlmostEqual(metrics["Total EV_01B Unmet Load (kWh)"], -0.1)
 
 
 class AggregationAndPlotTests(unittest.TestCase):

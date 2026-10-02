@@ -34,6 +34,12 @@ ochre/defaults/Input Files/OCHRE*
 
 # Generated example outputs are reproducible and can be large.
 /examples/**/outputs*/
+/output/
+/tmp/
+
+# Retain inference parameters, but omit generated model diagnostics.
+/examples/single_home_hems/models/*/figures/
+/examples/single_home_hems/models/*/parameter_sweep.csv
 
 # Keep only the active five-home input cohort in version control.
 /examples/five_home_block/inputs/**/*.zip

@@ -144,6 +144,17 @@ class Dwelling(Simulator):
             self.equipment[equipment_name] = eq
             self.sub_simulators.append(eq)
 
+        result_names: dict[str, str] = {}
+        for equipment_name, equipment in self.equipment.items():
+            previous = result_names.get(equipment.results_name)
+            if previous is not None:
+                raise OCHREException(
+                    "Equipment result names must be unique: "
+                    f"{previous!r} and {equipment_name!r} both use "
+                    f"{equipment.results_name!r}"
+                )
+            result_names[equipment.results_name] = equipment_name
+
         # sort equipment by end use
         self.equipment_by_end_use = {
             end_use: [e for e in self.equipment.values() if e.end_use == end_use]
@@ -154,7 +165,7 @@ class Dwelling(Simulator):
             if len(eq) > 1:
                 if end_use in ["HVAC Heating", "HVAC Cooling", "Water Heating"]:
                     raise OCHREException(f"More than 1 equipment defined for {end_use}: {eq}")
-                elif end_use not in ["Lighting", "Other"]:
+                elif end_use not in ["Lighting", "Other", "EV"]:
                     self.warn(f"More than 1 equipment defined for {end_use}: {eq}")
 
         for name, eq in self.equipment.items():

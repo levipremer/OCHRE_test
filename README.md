@@ -23,9 +23,9 @@ Useful starting points are:
 - `examples/five_home_block/run_simulation.py` for the five-home neighborhood;
 - `examples/five_home_block/run_parametric_study.py` for the seasonal
   electrification study;
-- `examples/single_home_hems/run_simulation.py` and
-  `examples/single_home_hems/hems.py` for single-home control and future EV
-  work;
+- [Single-home HEMS simulation guide](examples/single_home_hems/README.md)
+  for water-heater convex/MILP MPC, scenario forecasts, DC-house water replay,
+  and EV control, including installation and runnable examples;
 - the notebooks under `bin/` for system identification, MPC, TOU MPC, and
   DeePC experiments. The predictive-control notebooks additionally require
   `cvxpy`.

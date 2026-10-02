@@ -103,20 +103,25 @@ class HomeConfig:
     cooling_setpoint_c: float
     heating_deadband_c: float
     heating_deadband_offset: float
+    cooling_deadband_c: float
+    cooling_deadband_offset: float
     compressor_min_on_time_min: float
     compressor_min_off_time_min: float
     backup_deadband_c: float
     backup_setpoint_offset_c: float
     backup_stage_escalation_delay_min: float
     backup_number_of_stages: int | None
-    backup_stage_capacities_kw: tuple[float, ...] | None
+    backup_stage_capacities_kw: float | tuple[float, ...] | None
     water_heater_setpoint_c: float
     evs: tuple[EVConfig, ...]
+    water_heater_deadband_c: float | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], repo_root: Path) -> "HomeConfig":
         """Build and validate a home configuration from decoded JSON."""
-        required = {field.name for field in cls.__dataclass_fields__.values()}
+        required = {field.name for field in cls.__dataclass_fields__.values()} - {
+            "water_heater_deadband_c"
+        }
         missing = required - set(data)
         if missing:
             raise ConfigurationError(f"Home config is missing fields: {sorted(missing)}")
@@ -134,6 +139,8 @@ class HomeConfig:
             cooling_setpoint_c=float(data["cooling_setpoint_c"]),
             heating_deadband_c=float(data["heating_deadband_c"]),
             heating_deadband_offset=float(data["heating_deadband_offset"]),
+            cooling_deadband_c=float(data["cooling_deadband_c"]),
+            cooling_deadband_offset=float(data["cooling_deadband_offset"]),
             compressor_min_on_time_min=float(data["compressor_min_on_time_min"]),
             compressor_min_off_time_min=float(data["compressor_min_off_time_min"]),
             backup_deadband_c=float(data["backup_deadband_c"]),
@@ -148,11 +155,20 @@ class HomeConfig:
             ),
             backup_stage_capacities_kw=(
                 tuple(float(value) for value in stage_capacities)
-                if stage_capacities is not None
-                else None
+                if isinstance(stage_capacities, (list, tuple))
+                else (
+                    float(stage_capacities)
+                    if stage_capacities is not None
+                    else None
+                )
             ),
             water_heater_setpoint_c=float(data["water_heater_setpoint_c"]),
             evs = evs,
+            water_heater_deadband_c=(
+                float(data["water_heater_deadband_c"])
+                if data.get("water_heater_deadband_c") is not None
+                else None
+            ),
         )
         config.validate()
         return config
@@ -163,6 +179,7 @@ class HomeConfig:
             raise ConfigurationError("home_id must be nonempty and contain no whitespace")
         positive = {
             "heating_deadband_c": self.heating_deadband_c,
+            "cooling_deadband_c": self.cooling_deadband_c,
             "backup_deadband_c": self.backup_deadband_c,
             "backup_setpoint_offset_c": self.backup_setpoint_offset_c,
             "backup_stage_escalation_delay_min": self.backup_stage_escalation_delay_min,
@@ -170,6 +187,14 @@ class HomeConfig:
         for label, value in positive.items():
             if value <= 0:
                 raise ConfigurationError(f"{self.home_id}: {label} must be positive")
+        if self.water_heater_deadband_c is not None and self.water_heater_deadband_c <= 0:
+            raise ConfigurationError(f"{self.home_id}: water_heater_deadband_c must be positive")
+
+        vehicle_ids = [ev.vehicle_id for ev in self.evs]
+        if len(vehicle_ids) != len(set(vehicle_ids)):
+            raise ConfigurationError(
+                f"{self.home_id}: EV vehicle IDs must be unique, got {vehicle_ids}"
+            )
 
         for ev in self.evs:
             # Capacity must be positive
@@ -221,18 +246,24 @@ class HomeConfig:
                 f"{self.home_id}: backup_number_of_stages must be a positive integer"
             )
         if self.backup_stage_capacities_kw is not None:
-            if any(value not in (5, 10) for value in self.backup_stage_capacities_kw):
+            if isinstance(self.backup_stage_capacities_kw, float):
+                if self.backup_stage_capacities_kw <= 0:
+                    raise ConfigurationError(
+                        f"{self.home_id}: backup capacity must be positive"
+                    )
+            elif any(value not in (5, 10) for value in self.backup_stage_capacities_kw):
                 raise ConfigurationError(
                     f"{self.home_id}: backup stage capacities must be 5 or 10 kW"
                 )
-            if tuple(sorted(self.backup_stage_capacities_kw, reverse=True)) != (
+            elif tuple(sorted(self.backup_stage_capacities_kw, reverse=True)) != (
                 self.backup_stage_capacities_kw
             ):
                 raise ConfigurationError(
                     f"{self.home_id}: backup stage capacities must list larger stages first"
                 )
             if (
-                self.backup_number_of_stages is not None
+                not isinstance(self.backup_stage_capacities_kw, float)
+                and self.backup_number_of_stages is not None
                 and len(self.backup_stage_capacities_kw) != self.backup_number_of_stages
             ):
                 raise ConfigurationError(
@@ -242,6 +273,10 @@ class HomeConfig:
             raise ConfigurationError(
                 f"{self.home_id}: heating_deadband_offset must be between zero and one"
             )
+        if not 0 <= self.cooling_deadband_offset <= 1:
+            raise ConfigurationError(
+                f"{self.home_id}: cooling_deadband_offset must be between zero and one"
+            )
         nonnegative = {
             "compressor_min_on_time_min": self.compressor_min_on_time_min,
             "compressor_min_off_time_min": self.compressor_min_off_time_min,
@@ -249,9 +284,9 @@ class HomeConfig:
         for label, value in nonnegative.items():
             if value < 0:
                 raise ConfigurationError(f"{self.home_id}: {label} cannot be negative")
-        if self.cooling_setpoint_c - self.heating_setpoint_c < 1:
+        if self.cooling_setpoint_c < self.heating_setpoint_c:
             raise ConfigurationError(
-                f"{self.home_id}: cooling setpoint must be at least 1 C above heating setpoint"
+                f"{self.home_id}: cooling setpoint cannot be below heating setpoint"
             )
 
 

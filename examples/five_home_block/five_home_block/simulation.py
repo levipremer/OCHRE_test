@@ -108,9 +108,21 @@ class NeighborhoodSimulation:
                 f"{home.home_id}: implausible indoor temperature range "
                 f"{indoor.min():.2f} to {indoor.max():.2f} C"
             )
-        soc = standardized["ev_soc_fraction"]
-        if not soc.between(-1e-6, 1 + 1e-6).all():
-            raise RuntimeError(f"{home.home_id}: EV SOC is outside [0, 1]")
+        per_ev_soc_fields = [
+            column
+            for column in standardized.columns
+            if column.startswith("ev_") and column.endswith("_soc_fraction")
+        ]
+        soc_fields = per_ev_soc_fields or (
+            ["ev_soc_fraction"] if "ev_soc_fraction" in standardized else []
+        )
+        if not soc_fields:
+            raise RuntimeError(f"{home.home_id}: no EV SOC fields were reported")
+        for field in soc_fields:
+            if not standardized[field].between(-1e-6, 1 + 1e-6).all():
+                raise RuntimeError(
+                    f"{home.home_id}: {field} is outside [0, 1]"
+                )
         water = standardized["water_heater_temperature_c"]
         if not water.between(0, 100).all():
             raise RuntimeError(

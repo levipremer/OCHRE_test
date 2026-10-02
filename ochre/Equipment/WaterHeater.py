@@ -551,11 +551,16 @@ class HeatPumpWaterHeater(ElectricResistanceWaterHeater):
             elif self.mode in ['Upper On', 'Lower On'] and t_lower < self.setpoint_temp - 15:
                 return 'Lower On'
 
+        # In HP-only mode, a hot upper node should stop heating even if the
+        # weighted control temperature remains below the restart threshold.
+        if self.hp_only_mode and t_upper >= self.max_temp:
+            return 'Off'
+
         if self.mode in ['Upper On', 'Lower On'] or t_control < self.setpoint_temp - self.deadband_temp:
             return 'Heat Pump On'
         elif t_control >= self.setpoint_temp:
             return 'Off'
-        elif t_upper >= self.setpoint_temp + 1:  # TODO: Could mess with this a little
+        elif not self.hp_only_mode and t_upper >= self.setpoint_temp + 1:
             return 'Off'
 
     def update_internal_control(self):
