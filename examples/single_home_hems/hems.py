@@ -11,9 +11,6 @@ from examples.single_home_hems.single_home_hems.controllers import (
     CompositeController,
     DeviceController,
 )
-from examples.single_home_hems.single_home_hems.controllers.ev import (
-    EVPredictiveController,
-)
 from examples.single_home_hems.single_home_hems.forecast import (
     Forecast,
     PriceSchedule,
@@ -22,8 +19,8 @@ from examples.single_home_hems.single_home_hems.forecast import (
 
 
 def _default_device_controllers() -> tuple[DeviceController, ...]:
-    """Preserve the example's starter TOU EV behavior by default."""
-    return (EVPredictiveController(),)
+    """No commands means native immediate-charge baseline, without optimization."""
+    return ()
 
 
 @dataclass

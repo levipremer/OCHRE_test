@@ -49,7 +49,7 @@ from examples.single_home_hems.single_home_hems import (
 )
 from examples.single_home_hems.single_home_hems.controllers import (
     DeviceController,
-    EVPredictiveController,
+    EVBaselineController,
     HVACPredictiveController,
     WaterHeaterPredictiveController,
 )
@@ -123,7 +123,7 @@ def build_device_controllers(
     if selection in {"hvac", "all"}:
         controllers.append(HVACPredictiveController())
     if selection in {"ev", "all"}:
-        controllers.append(EVPredictiveController(ev_names=ev_names))
+        controllers.append(EVBaselineController(ev_names=ev_names))
     return tuple(controllers)
 
 
@@ -131,6 +131,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run one five-home-block dwelling with a user-editable HEMS"
     )
+    parser.add_argument("--home-config", type=Path, help="Unified physical home/mobility JSON")
+    parser.add_argument("--control-config", type=Path, help="Unified per-home/device controller JSON")
+    parser.add_argument("--homes", nargs="+", help="Unified run: one or more home IDs (default: --home-id)")
     parser.add_argument(
         "--home-id",
         default="home_01",
@@ -140,7 +143,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--controller",
         choices=CONTROLLER_CHOICES,
-        default="ev",
+        default="none",
         help="Device controller to test (default: %(default)s)",
     )
     parser.add_argument(
@@ -308,6 +311,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = parse_args()
+    if getattr(args, "home_config", None) or getattr(args, "control_config", None):
+        if not (args.home_config and args.control_config):
+            raise ValueError("Both --home-config and --control-config are required")
+        defaults = build_argument_parser().parse_args([])
+        selection = {"home_config", "control_config", "home_id", "homes", "output_directory"}
+        changed = [key for key, value in vars(args).items() if key not in selection and value != getattr(defaults, key, None)]
+        if changed:
+            raise ValueError(f"Unified mode reads preferences from JSON, not legacy CLI overrides: {changed}")
+        from examples.single_home_hems.single_home_hems.control_config import load_unified
+        from examples.single_home_hems.single_home_hems.unified import run_unified
+        unified = load_unified(args.home_config, args.control_config, REPO_ROOT)
+        if args.output_directory:
+            unified.neighborhood = replace(unified.neighborhood, output_directory=args.output_directory.resolve())
+        run_unified(unified, args.homes or [args.home_id])
+        return 0
     if args.water_heater_horizon_hours <= 0:
         raise ValueError("--water-heater-horizon-hours must be positive")
     if args.forecast_type == "scenario":

@@ -1,0 +1,343 @@
+{
+  "source_commit": "e286f438250d8649487d9de569ee725e930ca5a9",
+  "source_commit_date": "2026-10-01",
+  "archived_on": "2026-10-07",
+  "zip_sha256": "cce1cb4b1110243af6432e03896a4710f2457468c83a95f5f5fa04bc91201660",
+  "files": [
+    {
+      "path": "examples/five_home_block/config/homes.json",
+      "git_blob_sha256": "048e456fa4e3529763652e70dcd5595b527b60100b08c2f449a6f35b0897bfe3",
+      "archived_sha256": "47a0551c3c688601549ad8802568d47215fcd8f7c91af7bd9de947170bdb7754",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/config/neighborhood.json",
+      "git_blob_sha256": "a856d7de3337972d037b0b0aaa834c11b7f2018b2fd4d389f796d8b21cb33c17",
+      "archived_sha256": "1b4df9ca1d3a00e23a13b85f717cea3669283da90b0fdbc1798a576e934613cf",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/__init__.py",
+      "git_blob_sha256": "2d1cdfe10d396dea0efe3ead39fe9273100f757b93dc7cb1072b1110ebd44c3c",
+      "archived_sha256": "bfc9061e4c20330249d73fa0104b6b7010040255b25f3e688e41211c23c4d9d2",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/aggregation.py",
+      "git_blob_sha256": "05ebc0c5b0d790068da510be1a707b05679fa06f62eddb36b362cb035ff1d413",
+      "archived_sha256": "75b5e20e1a711137d819aa5c5580cfaa72adeeff44e3f2d1825c368eb1ddf0fd",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/config.py",
+      "git_blob_sha256": "d97b1e74db5912eb158100adc574a9073630f8f101f1c1012c147aed61bc2d33",
+      "archived_sha256": "19b49b38c09023c566adcd9d2b10d34e969654c40bc607aeced9d8662855ec7b",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/home_factory.py",
+      "git_blob_sha256": "6ba2391bbc2938c85bd5ded0f9b6c3cc1cb6be6bafffcc9bc8c1c1d2a282fdb8",
+      "archived_sha256": "07b6206a94c26e469ed30db8204d3d552cb2622b988a37ddb47027f7fa064fee",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/output_mapping.py",
+      "git_blob_sha256": "d920bd3f7792a06a9ccfa3786b47ea2eb5a5de067ce22f9e49f444b4a8d4c3ad",
+      "archived_sha256": "38c9f0b0b27dce2a469e2277723af368ed6a4f11a1c4cbd26143cc4a18216b2f",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/parametric_study/__init__.py",
+      "git_blob_sha256": "34056e8a2ca48dbeb84fcd51f3ead60241a0e87c42ed5c33d422fe4611d960a0",
+      "archived_sha256": "f2501418c771100316ba1da5497f0fc6f785d178d2d5bf1fe3e3c0165415f7b4",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/parametric_study/config.py",
+      "git_blob_sha256": "e672fda8ff0863bee511bb40dd56053a110a44bfb408b832497b6502c5ee6100",
+      "archived_sha256": "4948c21b7371b1d5b3c26f14bdb1618aef41add153538a24c31845ffeb517ca5",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/parametric_study/cooking.py",
+      "git_blob_sha256": "3a9d453a3d64ab98e2f57d1bd8cf8cabc2a274bfd82b82b60143306d683a2fa4",
+      "archived_sha256": "32bf73f9a7af9a580a12ab9450e618ba39cca19cb2a0826a0d07782c53897e0a",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/parametric_study/equipment.py",
+      "git_blob_sha256": "b93b1c611ce765542fa88c382c251b9224ecba3695b4da11d11a7850b3c03db3",
+      "archived_sha256": "912b57af262196f448ea7b4887da363dd9fe561c22e26d05cb2067fb1f6dba28",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/parametric_study/outputs.py",
+      "git_blob_sha256": "00ff986562aa92bd7e78c9ed410eb14b1808f2ce913e2056029a72ee17a1cbb3",
+      "archived_sha256": "b5714be75eba3cf16c8fc3592e6571519b43822e902dafb93f07b096caf9675a",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/parametric_study/runner.py",
+      "git_blob_sha256": "b242859b99a346be0050bf1dc250b8d29edc4625fad1ac3b0a3ab0a98d5b08d8",
+      "archived_sha256": "f969f74f28567c87abfd6998dac2c70766755f26773edacb38f446c83dc97887",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/parametric_study/scenarios.py",
+      "git_blob_sha256": "d1284ee6272481b1906aab12a7f94a7674bb4113230f732b366a65109afab6a3",
+      "archived_sha256": "9539010d368639cd1e285ba7ca5e9677a7b79bcad16978872f77856c823b93a3",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/plotting.py",
+      "git_blob_sha256": "a36c119cfca47e7fb3c3d9aecfcda4545abb6a5329906eb7bcb1da57105e6cd5",
+      "archived_sha256": "afd2a0b804552058423f9479e34938cbf72022680aaf06b20d87da1b8b39578c",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/simulation.py",
+      "git_blob_sha256": "c6791b42e03100bd544a6e97d4f49918a0a0884b11aad7648985c89545b61e10",
+      "archived_sha256": "8e49e2527703ae5ea6a9570af2fd108f6e137161dcadadb218ecb387fcaf4d83",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/transformer/__init__.py",
+      "git_blob_sha256": "0bb5b82efd9df9924cf266b1c98aeebb22a6141da7584b71a1328c5b0e5c5a87",
+      "archived_sha256": "f7b44fe1a25473bb1b6b9e4461255083cb2fb0bfd71f04e2412d7a47dcf5f799",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/five_home_block/five_home_block/transformer/model.py",
+      "git_blob_sha256": "4f3aa65f161f8171d08de65d800f379014011cc6af213c75ebb55084e81978d8",
+      "archived_sha256": "003dbbd23bfda28d06748d5b46ffde7cf68d78a454a32fa4955962158731f6d2",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/README.md",
+      "git_blob_sha256": "7415e94d1d4a067eab7d9803235460c12449549657c4fc96360f9f57dafc2dbd",
+      "archived_sha256": "d70840cfa0358a10c9546d2b319e49b005e62cf2b3e77c7ceb49815cf98d5fe4",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/hems.py",
+      "git_blob_sha256": "03f929b126dcf80a4b416af68a652dcd974b5c2134271fb2e978d87bd0831e91",
+      "archived_sha256": "7182c60adcbff08ee79d2393e7bd91e4b4e56ef33640a13592310c1ab124f080",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/models/water_heater_model/metadata.json",
+      "git_blob_sha256": "27a60713cef44b0fa045a1f6f975fda342312db9a7282bfc8107fd8c8013c715",
+      "archived_sha256": "d7076615b1ef87090e65d3b747f024ca02b1f72f213a1c42781828290d5027f9",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/models/water_heater_model/model_arrays.npz",
+      "git_blob_sha256": "33087fdfe6bb73faabad844e40cc12d2649acc4f4a51e8686027ad5c1d296aa5",
+      "archived_sha256": "33087fdfe6bb73faabad844e40cc12d2649acc4f4a51e8686027ad5c1d296aa5",
+      "verification": "byte_exact"
+    },
+    {
+      "path": "examples/single_home_hems/models/water_heater_rc_model/metadata.json",
+      "git_blob_sha256": "31fe7ec2c86e4b2621f4470a9750a82618b136d17c92dd60cff6fc8b76369136",
+      "archived_sha256": "a7fb40f7ce5208c5a9701ad5bf2bbe87e8e07abfbf43bb5e1fd08f11971f1088",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/models/water_heater_rc_model_old/metadata.json",
+      "git_blob_sha256": "3488817200f5d7107a20b2c8d4135990d08c62f3c6f10a6dc4f7993ba9162865",
+      "archived_sha256": "803832c4ecf2590205b70b9c9b026269e5e92340bd7538ae4ca1faae6b0ca819",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/models/water_heater_rc_model_stratified/metadata.json",
+      "git_blob_sha256": "4ca99d9658d3a66749782cd3a8fee33eb797ea2eeaae2f1232414a8242262742",
+      "archived_sha256": "a7d77e98c4a1322de268b2a61b5cc038a8d0810b76962802dae813b9a60ad34f",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/requirements.txt",
+      "git_blob_sha256": "28aac9b1d01804b30ead807a8656af12f0047b04d4ed27d512abf5379c2f8318",
+      "archived_sha256": "a2b949422429a929f6a4db5e0ff9fe26535111d2cee9391fa93bfaa80abd4215",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/run_simulation.py",
+      "git_blob_sha256": "c594ae5e981b6d58b791bd594217a3e11e5ae04177355fcca1e641da4ed830ff",
+      "archived_sha256": "a67f21cebe50959f1db6d90b60ab1733aba37df8f89861ae9fbe8d03784f1e3e",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/run_water_heater_mpc_scenario.py",
+      "git_blob_sha256": "2f1242aaa2057f551e6cfb03a1786904fe557d653ff670319f54dfcdb4932579",
+      "archived_sha256": "46845aad8f84f68e31560b4905ee3db619daf05e6a2e7250a5a5e364139b2015",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/__init__.py",
+      "git_blob_sha256": "73c7351eb70c2f653eb2665d467fde4efbaf5105616bf544fa315ccb461e6d01",
+      "archived_sha256": "6d9c780b88bcd1c6bf42ecb77ea54c1fc9b8504cd8cd52c1a99d5238e5ae3daf",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/controller.py",
+      "git_blob_sha256": "765cd943f6bb2ac5bf3d1f4620629d8d742a84b25a01406cda7cc6ecd47a03d8",
+      "archived_sha256": "71c4c181a0d7bc816db5c62fffc2941e8d5eeb6dda1cd860524571e8c6818939",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/controllers/__init__.py",
+      "git_blob_sha256": "104fdf3ed4adb977aabd33f9554634161718d77bd3c01bd5392ffb29f856e26a",
+      "archived_sha256": "4df85064869968dd95c40c4d7c5d3a9ec041ad9546551ccf754ff2edd98aa549",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/controllers/base.py",
+      "git_blob_sha256": "905a3d90596f2bddfecbaeda4ad63c8ecb03e2b818a04f6b2fc490f34603e824",
+      "archived_sha256": "901dc6ee9989293d377574f741768bf16f315076f1ae998f21bf1a25e8ad8305",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/controllers/composite.py",
+      "git_blob_sha256": "d6f580ecaff4c5f0647cddf5604e314c260b92c2f85ba02661543618111b9f22",
+      "archived_sha256": "23ad4642e00f248de92d77332d2e11122419dd0faa83a7c6e953cb5e16a89a41",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/controllers/ev.py",
+      "git_blob_sha256": "37d022f0d8a6d475b16dacd93640ec44f1d7dffb8c71b7d3ed52948ffe5149cf",
+      "archived_sha256": "b44121cffaad2c79aca49e2345977d49ba5c0a1e1a3019ca1c9c0daed9240eb0",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/controllers/hvac.py",
+      "git_blob_sha256": "8eb39c3aab8860f88b7500b3187a29e704101bbe226a67d4e4748eb58acf55cb",
+      "archived_sha256": "a506bd4489c8b4ee37a544a8ba2393777c6174349ff6a50148eed65f12e3275f",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/controllers/water_heater.py",
+      "git_blob_sha256": "0e0fd57e947498ef8a99a3db63cb7285b7a1270dcbee649aa993d7d6b5f3da36",
+      "archived_sha256": "500502739e3681ca5988d543fd880e3b4704f80cf47d5f67f59b0b252eb00307",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/controllers/water_heater_scenario.py",
+      "git_blob_sha256": "75dd0b1e7a22165fa2f20eb589fed6b25b08a3db0fc53a1ecd685b13f88f7bb2",
+      "archived_sha256": "1af039cac80907bce66035038da6a2b22dae75a9e35515b0564fd65e1b27ce91",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/forecast.py",
+      "git_blob_sha256": "2b279a0cd0c092ced30f1c74cdacdb33cddd3d426f0b2704118c8b57f1b8d184",
+      "archived_sha256": "cab51be85d6ca5c884cf78a870bf51b7275f825dc35c9ba0695db672101fd204",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/plotting.py",
+      "git_blob_sha256": "c48479f1c320e3b4a775ac309c420c74537ecd368d506fbd52647efab79724a7",
+      "archived_sha256": "ab10887d0f05e57bb4bbd0a86bfb4db22652155cf486772492be964b1474a6f8",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/simulation.py",
+      "git_blob_sha256": "c533003cbffe7451d5a5ee461e2a3980a5080bf2958f4f34a816fac63b246b64",
+      "archived_sha256": "28cb1e51008e36b692670e0afea3e8861e8e098ef0a6af21289e47b3e7613f12",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/training/__init__.py",
+      "git_blob_sha256": "e0cea636f23b9160de8ae0d6f2b806f44c3f2dc2b00d309783df0309b4ce9361",
+      "archived_sha256": "1e966478be919e9d03d127422bd31cad3de01bc5e96bca248feb84de00a5b2ff",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/training/hvac.py",
+      "git_blob_sha256": "44fe33b9fd1968c8214e95c698dd024b091a7aebe0322e153ea4f465f9e8a9b2",
+      "archived_sha256": "5c41086ced1dbb5c08bfa822affb8f89d36d04391e10116f0125608a2e67ba24",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/training/hvac_model.py",
+      "git_blob_sha256": "1048decd99adfc77280549482eb3de46fc3f4d177847a87d616bc15ad57f64d6",
+      "archived_sha256": "7b42800318e69bcdbb09bbfd260f0c4bd00732dc90b6f07b0584af18138e7537",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/training/model_diagnostics.py",
+      "git_blob_sha256": "a311f5e9edd3a01a3517d6fa1cade90a1ea998df39342a7809ee289f4e43a3bf",
+      "archived_sha256": "3aa2751fdcb65c155cd031a7ec60b3c0ee8fd1f727495f7e20bf1f4f1dbc43a7",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/training/state_space_predictor.py",
+      "git_blob_sha256": "2f4fdc1f34ed49e429b5e0d90e708d505229370386805dc8e9b3504a265faa75",
+      "archived_sha256": "82bd2c0d49f707274710c3071b724bfa6cbb78ed2b340ebdcb9dc88873913f49",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/training/state_space_predictor_regularized.py",
+      "git_blob_sha256": "d3c78f7b61b5201d15d8453d4d59897f58dbe8703fa76ff023aa3c6dd9aa8b5f",
+      "archived_sha256": "fb21c27eb46bf38f47a784c69a720ae8c123a1c781aa41820dc0b64756fd69db",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/training/water_heater.py",
+      "git_blob_sha256": "3e993f79297df03d2cc0e0043fe86ccf8e020466e58d1def305cd7965474ac6e",
+      "archived_sha256": "9554db069ba7a1d64a959c861cf4a96a0b452e4730c8a8a99952fa084d2b02db",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/training/water_heater_model.py",
+      "git_blob_sha256": "187638216706782c678b7c1d3bd8337d31f316d8bbd0fc7e4e0a589c81834ace",
+      "archived_sha256": "0eb019f43edb6343702df9027ac2bfeea6cf6ca6f4379f898caeb1abd025a3ce",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/water_forecast.py",
+      "git_blob_sha256": "2ca7b5b938ec941e72c2f4af1a532ebc4784998504cd5cae4b3e57816dab042a",
+      "archived_sha256": "6f367eafc1345f1d1945bb7ba468e707329b9c8652df1ff8fffde9c2c41d289b",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/single_home_hems/water_heater_rc.py",
+      "git_blob_sha256": "142d383654236d30b5cabd477e35d2cc8d9dda7c0e6225858f3aaea19d812e8f",
+      "archived_sha256": "a17347fbff77aab33cc5cb2414e23f2cb6fb0fd39a80a33def53648338b98ced",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/water_usage_forecasting/__init__.py",
+      "git_blob_sha256": "11009a1b542625abf28dc0d51caf9e6db63801af28c7107d7661811588ae0b3e",
+      "archived_sha256": "db470d60e945d425de07bc294a118e2aa02e30475e99c9b1787b51ac21286dc0",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/water_usage_forecasting/data.py",
+      "git_blob_sha256": "04a696fdf9884360a18c2994e2768584a9658a41db155eac83d0276c49ca405f",
+      "archived_sha256": "1251df32395475a88c6c51abf05db68992a6e6d910f4892b05a352080d849eff",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/water_usage_forecasting/hybrid.py",
+      "git_blob_sha256": "17979eb1fc4fc62e9b176ebdee6bb408775425a89a72db22f72d8202d6f13dbb",
+      "archived_sha256": "cf28674d00e953875fd1cf33b126989bc6dea567036ccb2e4b8de8857db692f7",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/water_usage_forecasting/rf_shortlead.py",
+      "git_blob_sha256": "1ea5b3badc195a6abdfa1633af124910ae86165dd93ec36545f089794959f879",
+      "archived_sha256": "4e40fbdaf1ebdfd734e8731b63ad8fa946e671775612370501fe13d83855e535",
+      "verification": "text_equal_after_LF_normalization"
+    },
+    {
+      "path": "examples/single_home_hems/water_usage_forecasting/scenario_methods.py",
+      "git_blob_sha256": "6ffc46a5e15b3c2e64b64469c0b64f19673d415d2c37dafd2c4bf557fc873b25",
+      "archived_sha256": "118e6d0e9bd4ce489209135c745f6028676c2009b945b9334be9d2f2fbf548d5",
+      "verification": "text_equal_after_LF_normalization"
+    }
+  ],
+  "recovered_ev_controller": {
+    "path": "pre_unification_ev\\examples\\single_home_hems\\single_home_hems\\controllers\\ev_mpc.py",
+    "sha256": "bd610c4380386a54293cc0827943981ccaa9b27265cc27bfb02dfbdcf8fc2c2b",
+    "source": "Session capture before unified-controller edits; text line endings normalized"
+  }
+}

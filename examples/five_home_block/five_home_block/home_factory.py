@@ -401,11 +401,12 @@ def overlaps(trip, commute):
 
 def distance_to_kwh(ev: EVConfig, distance_miles: float, temp_c: float) -> float:
     # Driving efficiencies of different EV vehicle types (miles/kWh)
-    # https://www.epa.gov/system/files/documents/2026-02/420r26001.pdf
+    #Source: Electric Vehicle Efficiency Ratios for Light-Duty Vehicles Registered in the United States
+    # https://docs.nlr.gov/docs/fy23osti/84631.pdf
     base_eff = {
-        "sedan": 3.4,
-        "suv":   2.9,
-        "truck": 2.2,
+        "sedan": 132/33.71, # midsize sedan MPGe / [kWh/gal]
+        "suv":   119/33.71, # small SUV MPGe / [kWh/gal]
+        "truck": 86/33.71, #large SUV MPGe / [kWh/gal]
     }[ev.vehicle_type.lower()]
 
     # Temperature penalty (AAA test data)
@@ -684,6 +685,7 @@ def _equipment_overrides(
     water_heater_hp_only: bool = False,
     evs: tuple[EVConfig, ...] | None = None,
     ev_event_schedules: Mapping[str, pd.DataFrame] | None = None,
+    ev_mobility_schedules: Mapping | None = None,
     write_ev_diagnostics: bool = True,
     defrost_model: str = "Legacy",
     defrost_control_type: str = "Auto",
@@ -743,7 +745,7 @@ def _equipment_overrides(
 
     trip_pool = None
     weather_by_mdhm = None
-    if ev_event_schedules is None:
+    if ev_event_schedules is None and any(ev.hems is None for ev in configured_evs):
         trip_pool = build_trip_pool(
             neighborhood.ev_trip_file,
             neighborhood.NHTS_location_CDIVMSAR_ID,
@@ -765,6 +767,19 @@ def _equipment_overrides(
             )
 
     for ev in configured_evs:
+        if ev.hems is not None:
+            from dataclasses import asdict
+            from .ev_equipment import BidirectionalEV
+            if ev_mobility_schedules is None or ev.vehicle_id not in ev_mobility_schedules:
+                raise ValueError("Opt-in EV equipment requires prepared mobility schedules")
+            ev_equipment[f"EV_{ev.vehicle_id}"] = {
+                "equipment_class": BidirectionalEV, "results_name": f"EV_{ev.vehicle_id}",
+                "ev_config": {"vehicle_id": ev.vehicle_id, "capacity_kwh": ev.capacity_kwh,
+                              "charger_power_kw": ev.charger_power_kw,
+                              "initial_soc_fraction": ev.initial_soc_fraction, "hems": asdict(ev.hems)},
+                "mobility": dict(vars(ev_mobility_schedules[ev.vehicle_id])),
+            }
+            continue
         if ev_event_schedules is not None:
             try:
                 ev_sched = ev_event_schedules[ev.vehicle_id].copy(deep=True)
@@ -876,6 +891,7 @@ def create_dwelling(
     water_nodes: int | None = None,
     water_heater_hp_only: bool = False,
     initial_temp_setpoint: float | None = None,
+    ev_mobility_schedules: Mapping | None = None,
 ) -> Dwelling:
     """Create a dwelling; None retains OCHRE's randomized indoor temperature."""
     if water_nodes is not None and (
@@ -885,6 +901,14 @@ def create_dwelling(
     ):
         raise ValueError("water_nodes must be a positive integer")
     rng = np.random.default_rng(neighborhood.random_seed + home.seed_offset)
+    if any(ev.hems is not None for ev in home.evs):
+        from .ev_config import validate_home_evs
+        from .ev_schedule import build_ev_schedules
+        validate_home_evs(home.evs)
+        if neighborhood.initialization_time:
+            raise ValueError("Opt-in EV replay requires zero initialization time")
+        if ev_mobility_schedules is None:
+            ev_mobility_schedules = build_ev_schedules(neighborhood, home)
     raw_output_directory.mkdir(parents=True, exist_ok=True)
     dwelling = Dwelling(
         name=home.home_id,
@@ -908,6 +932,7 @@ def create_dwelling(
             rng,
             water_nodes=water_nodes,
             water_heater_hp_only=water_heater_hp_only,
+            ev_mobility_schedules=ev_mobility_schedules,
             defrost_model=neighborhood.defrost_model,
             defrost_control_type=neighborhood.defrost_control_type,
             defrost_er_strategy=neighborhood.defrost_er_strategy,

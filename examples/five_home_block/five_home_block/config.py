@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .transformer import DistributionTransformer
+from .ev_config import EVOptions, validate_home_evs
 
 
 class ConfigurationError(ValueError):
@@ -44,10 +45,12 @@ class EVConfig:
     max_commute_distance_var_miles: float | None
     max_commute_times_var_hr: float | None
     max_roundtrip_miles: float | None
+    hems: EVOptions | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EVConfig":
         return cls(
+            hems=EVOptions(**data["hems"]) if data.get("hems") is not None else None,
             vehicle_id=str(data["vehicle_id"]),
             vehicle_type=str(data["vehicle_type"]),
             capacity_kwh=float(data["capacity_kwh"]),
@@ -341,6 +344,8 @@ class NeighborhoodConfig:
         if not self.homes:
             raise ConfigurationError("at least one home must be configured")
         ids = [home.home_id for home in self.homes]
+        for home in self.homes:
+            validate_home_evs(home.evs)
         if len(ids) != len(set(ids)):
             raise ConfigurationError(f"home IDs must be unique, got {ids}")
 
@@ -363,6 +368,12 @@ def load_configuration(config_directory: Path, repo_root: Path | None = None) ->
         data = json.load(stream)
     with homes_file.open(encoding="utf-8") as stream:
         home_data = json.load(stream)
+
+    return configuration_from_documents(data, home_data, config_directory, repo_root)
+
+
+def configuration_from_documents(data, home_data, config_directory, repo_root):
+    """Build shared runtime objects without reading any legacy config files."""
 
     homes = tuple(HomeConfig.from_dict(item, repo_root) for item in home_data)
     output_path = Path(data["output_directory"])

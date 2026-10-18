@@ -71,7 +71,7 @@ def isolated_runner():
         "DEFAULT_RC_OLD_MODEL_PATH": Path("/unused/rc-old"),
         "DEFAULT_RC_STRATIFIED_MODEL_PATH": Path("/unused/rc-stratified"),
         "WaterHeaterPredictiveController": water_heater,
-        "HVACPredictiveController": MagicMock(), "EVPredictiveController": MagicMock(),
+        "HVACPredictiveController": MagicMock(), "EVBaselineController": MagicMock(),
         "load_configuration": MagicMock(return_value=config),
         "select_home": MagicMock(return_value=home),
         "replace": MagicMock(return_value=config),

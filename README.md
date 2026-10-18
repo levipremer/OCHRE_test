@@ -2,35 +2,68 @@
 
 # OCHRE: The Object-oriented Controllable High-resolution Residential Energy Model
 
-> **Work fork:** This repository extends the base OCHRE model with HVAC
-> defrost and staged backup-heat behavior, system-identification and predictive-
-> control experiments, and multi-home/HEMS examples. See
-> [CUSTOM_CHANGES.md](CUSTOM_CHANGES.md) for the differences from base OCHRE
-> and the current limitations.
+## Unified HEMS research fork
 
-## Work-fork quick start
+Built on NREL OCHRE (base commit `458b9b2`), this fork adds EV/V2H and HPWH
+control, dynamic battery health, and reproducible paired studies. HVAC remains
+native/pass-through. Upstream attribution and native usage are retained below.
 
-The custom work is based on OCHRE commit `458b9b2`. Use Python 3.9 through
-3.12 and install the repository in editable mode:
+### Added and changed
 
-```bash
+- Standalone home physics/mobility and control preferences, independently
+  configurable per home/EV: solver, formulation, horizon, forecast and weights.
+- One runner saves all-baseline, non-V2H twin and advanced trajectories.
+  Twin end-use demand supplies backed-load forecasts; actual-load caps protect execution.
+- EV convex/MILP and historical-scenario MPC, fixed solve clocks, departure
+  comfort, optional health/degradation/terminal costs, and baseline fallback.
+- Continuous SOH/damage accounting, faded-capacity SOC, baseline-relative net
+  savings, unscored warmup/cooldown and consolidated performance/solver reports.
+- Frozen paired studies and resumable attempts. Existing HVAC defrost,
+  backup heat, system identification and multi-home functionality remain.
+
+### Install and run
+
+Use Python **3.12** for custom HEMS (study hashing requires 3.11+). From this
+checkout, in PowerShell:
+
+```powershell
 python -m venv .venv
-.venv/bin/python -m pip install -e . pytest
+.\.venv\Scripts\python.exe -m pip install -e . -r examples/single_home_hems/requirements.txt
+.\.venv\Scripts\python.exe examples/single_home_hems/run_simulation.py --home-config examples/single_home_hems/config/unified_home.json --control-config examples/single_home_hems/config/unified_control.json --home-id home_01 --output-directory examples/single_home_hems/outputs/my_unified_run
 ```
 
-Useful starting points are:
+On Linux/macOS use `.venv/bin/python`. Review the selected JSONs before running;
+use a fresh output directory. CLARABEL supports convex problems, SCIPY supports
+MILP, and optional GUROBI needs its package **and a suitable license**.
+Installing gurobipy alone does not remove license size limits.
 
-- `examples/five_home_block/run_simulation.py` for the five-home neighborhood;
-- `examples/five_home_block/run_parametric_study.py` for the seasonal
-  electrification study;
-- [Single-home HEMS simulation guide](examples/single_home_hems/README.md)
-  for water-heater convex/MILP MPC, scenario forecasts, DC-house water replay,
-  and EV control, including installation and runnable examples;
-- the notebooks under `bin/` for system identification, MPC, TOU MPC, and
-  DeePC experiments. The predictive-control notebooks additionally require
-  `cvxpy`.
+### Navigate and extend
 
-The original OCHRE overview and usage documentation follow below.
+| Guide | Purpose |
+| --- | --- |
+| [HEMS quick start](examples/single_home_hems/README.md) | Templates, dependencies and commands |
+| [Pipeline](examples/single_home_hems/docs/pipeline.md) | Three-case flow, constraints and outputs |
+| [Extension map](examples/single_home_hems/docs/extending.md) | Module responsibilities and safe changes |
+| [Battery model](examples/single_home_hems/docs/degradation.md) | SOH, calibration and damage pricing |
+| [Scenarios](examples/single_home_hems/docs/scenarios.md) | Historical selection and joint scenario OCP |
+| [Studies](examples/single_home_hems/docs/studies.md) | Stage, execute, resume and compare variants |
+| [Five-home example](examples/five_home_block/README.md) | Shared factory, inputs and neighborhood experiments |
+| [Validation](examples/single_home_hems/docs/validation/README.md) | Commands and known failures |
+| [Change history](CUSTOM_CHANGES.md) / [archive](archive/development_docs_2026-10-17/README.md) | Research changes and superseded guides |
+
+Native physics live in `ochre/`; shared EV equipment, mobility and aging models
+live in `examples/five_home_block/five_home_block/`. Controllers, forecasts,
+orchestration and reporting live in `examples/single_home_hems/single_home_hems/`.
+Tests are in `test/`; predictors remain under the example's `models/`.
+Keep referenced datasets available; review redistribution rights before publishing.
+
+Extend these interfaces instead of creating another simulation loop.
+[AGENTS.md](AGENTS.md) requires explicit approval for formulation changes.
+The full suite has known legacy failures and terminal mean/minimum discrepancies.
+Source cleanup also changes study fingerprints: use a new study revision or
+the original checkout for older experiments; do not bypass environment checks.
+
+## Upstream OCHRE overview
 
 OCHRE&trade; is a Python-based energy modeling tool designed to model end-use
 loads and distributed energy resources in residential buildings. It can model
@@ -48,7 +81,10 @@ OCHRE](https://www.youtube.com/watch?v=B5elLVtYDbI) webinar recording.
 
 If you use OCHRE for your research or other projects, please fill out our [user survey](https://forms.office.com/g/U4xYhaWEvs).
 
-## Installation
+## Native upstream installation
+
+These commands install upstream OCHRE, not this fork's HEMS additions. For the
+unified pipeline, use the editable-checkout installation above.
 
 OCHRE can be installed using `pip` from the command line:
 

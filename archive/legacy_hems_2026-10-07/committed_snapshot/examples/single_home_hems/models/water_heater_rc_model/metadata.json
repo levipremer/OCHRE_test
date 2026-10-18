@@ -1,0 +1,98 @@
+{
+  "schema_version": 2,
+  "model_type": "two_node_water_heater_rc",
+  "fitting_method": "measured_power_euler_fixed_resistance",
+  "parameters": {
+    "volume_l": 170.34353027999995,
+    "height_m": 1.2191999999999998,
+    "ua_w_per_k": 1.8991008,
+    "upper_fraction": 0.7855661041676358,
+    "upper_heat_fraction": 0.330476965073647,
+    "cop": 3.4984950853475123,
+    "on_power_kw": 0.46101484637960877,
+    "off_power_kw": 0.0010000000000000002,
+    "deadband_c": 8.17,
+    "stratification_thickness_m": null
+  },
+  "derived": {
+    "heat_capacity_kwh_per_k": 0.19792971865589995,
+    "ambient_resistance_k_per_kw": 526.5649932852432,
+    "inter_node_resistance_k_per_kw": 6810.94439160819,
+    "maximum_heat_kw": 1.6093596792459521
+  },
+  "tempered_draw_temperature_c": 40.55555555555556,
+  "inter_node_resistance_method": "fixed_half_tank_height",
+  "fit_objective": "0.5*mean(0.75*upper_one_step_temperature_error_c^2 + 0.25*lower_one_step_temperature_error_c^2) with measured electric power",
+  "selection_objective": null,
+  "normalization": {
+    "temperature_c": 14.776909352664662,
+    "power_kw": 0.5263115863571338
+  },
+  "selection": null,
+  "test_metrics": {
+    "score": 0.056666655251035196,
+    "tank_error": 0.0029291217299392976,
+    "power_error": 0.1104041887721311,
+    "upper_rmse_c": 0.03898406737950551,
+    "lower_rmse_c": 0.056181263006416675,
+    "power_rmse_kw": 0.05810700373313278
+  },
+  "sample_period_seconds": 60.0,
+  "prediction_horizon_seconds": 43200.0,
+  "windows": {
+    "training": {
+      "start": "2018-01-01T00:00:00",
+      "end": "2018-01-09T00:00:00"
+    },
+    "validation": {
+      "start": "2018-01-09T00:00:00",
+      "end": "2018-01-11T00:00:00"
+    },
+    "test": {
+      "start": "2018-01-11T00:00:00",
+      "end": "2018-01-15T00:00:00"
+    }
+  },
+  "fit_windows": [
+    "training",
+    "validation"
+  ],
+  "sensor_layout": {
+    "model_nodes": 12,
+    "node_order": "top_to_bottom",
+    "height_reference": "fraction_from_tank_bottom_to_node_center",
+    "sensors": [
+      {
+        "node": 3,
+        "height_fraction_from_bottom": 0.7916666666666666,
+        "column": "water_heater_sensor_node_03_temperature_c"
+      },
+      {
+        "node": 10,
+        "height_fraction_from_bottom": 0.20833333333333334,
+        "column": "water_heater_sensor_node_10_temperature_c"
+      }
+    ]
+  },
+  "columns": {
+    "outputs": [
+      "water_heater_sensor_node_03_temperature_c",
+      "water_heater_sensor_node_10_temperature_c"
+    ],
+    "power": "water_heater_electric_power_kw",
+    "disturbances": [
+      "water_heater_draw_l_per_min",
+      "water_heater_mains_temperature_c",
+      "water_heater_tank_ambient_temperature_c"
+    ]
+  },
+  "figure_files": [
+    "three_split_predictions.png",
+    "residual_diagnostics.png",
+    "rmse_by_horizon.png",
+    "measured_vs_predicted.png",
+    "power_reconstruction.png"
+  ],
+  "training_data": "/Users/levipremer/PycharmProjects/OCHRE_test/examples/single_home_hems/outputs/water_heater_rc_training/data/home_01_water_heater_training_data.csv",
+  "ochre_arguments": "/Users/levipremer/PycharmProjects/OCHRE_test/examples/single_home_hems/outputs/water_heater_rc_training/data/raw/home_01.json"
+}

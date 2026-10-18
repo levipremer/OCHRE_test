@@ -5,6 +5,12 @@ clock for one day, maps version-specific OCHRE outputs to stable internal
 names, aggregates neighborhood power, validates the results, and creates 12
 headless Matplotlib figures.
 
+For EV/V2H and HPWH MPC experiments, use the [unified HEMS guide](../single_home_hems/README.md).
+This example's home_factory and shared EV modules remain active dependencies.
+The neighborhood config files below still serve this runner; standalone unified
+home/control documents do not fall back to them. Opted-in EV homes can route
+through the unified adapter; this does not implement coordinated neighborhood MPC.
+
 ## Layout
 
 ```text
@@ -20,6 +26,10 @@ examples/five_home_block/
 └── five_home_block/
     ├── config.py                # typed configuration loader and validation
     ├── home_factory.py          # OCHRE dwelling creation and equipment checks
+    ├── ev_config.py             # validated internal EV options
+    ├── ev_schedule.py           # canonical NHTS/Audi mobility adapters
+    ├── ev_equipment.py          # bidirectional plant and dynamic SOH
+    ├── ev_degradation.py        # shared rainflow/throughput damage accounting
     ├── output_mapping.py        # OCHRE-to-standard output mapping
     ├── aggregation.py           # power aggregation and balance checks
     ├── plotting.py              # headless figures

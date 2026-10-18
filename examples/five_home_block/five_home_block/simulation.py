@@ -85,6 +85,8 @@ class NeighborhoodSimulation:
             "ev_power_kw",
         )
         for field in charging_load_fields:
+            if field == "ev_power_kw" and any(ev.hems and ev.hems.v2h for ev in home.evs):
+                continue
             minimum = standardized[field].min()
             if minimum < -tolerance:
                 raise RuntimeError(
@@ -137,6 +139,25 @@ class NeighborhoodSimulation:
 
     def _run_home(self, home: HomeConfig) -> tuple[pd.DataFrame, dict[str, list[str]]]:
         print(f"Running {home.home_id}: {home.description}")
+        if any(ev.hems is not None for ev in home.evs):
+            from dataclasses import replace
+            from examples.single_home_hems.hems import HEMSController
+            from examples.single_home_hems.single_home_hems.simulation import SingleHomeHEMSSimulation
+            config = replace(self.config, homes=(home,),
+                             output_directory=self.config.output_directory / "ev" / home.home_id)
+            simulation = SingleHomeHEMSSimulation(config, home, HEMSController())
+            summary = simulation.run()
+            raw = summary.raw_results
+            mapped = standardize_results(raw, home.home_id)
+            self._validate_home(home, raw, mapped.data)
+            # Preserve the neighborhood weather loader's existing file contract.
+            target = self.raw_directory / home.home_id
+            target.mkdir(parents=True, exist_ok=True)
+            schedule = pd.read_csv(summary.raw_directory / f"{home.home_id}_schedule.csv",
+                                   index_col="Time", parse_dates=True)
+            schedule.reindex(self._expected_index()).to_csv(target / f"{home.home_id}_schedule.csv", index_label="Time")
+            mapped.data.to_csv(self.data_directory / f"{home.home_id}_standardized.csv")
+            return mapped.data, mapped.selected_columns
         dwelling = create_dwelling(
             self.config,
             home,

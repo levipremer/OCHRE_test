@@ -2,14 +2,13 @@
 
 from .controller import HEMSControllerProtocol
 from .forecast import Forecast, PriceSchedule, TimeOfUsePrice
-from .simulation import SingleHomeHEMSSimulation, SingleHomeSimulationSummary, select_home
+from .simulation import SingleHomeHEMSSimulation, select_home
 
 __all__ = [
     "HEMSControllerProtocol",
     "Forecast",
     "PriceSchedule",
     "SingleHomeHEMSSimulation",
-    "SingleHomeSimulationSummary",
     "TimeOfUsePrice",
     "select_home",
 ]

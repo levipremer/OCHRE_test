@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -19,22 +18,10 @@ from examples.five_home_block.five_home_block.config import (
     NeighborhoodConfig,
 )
 from examples.five_home_block.five_home_block.home_factory import create_dwelling
-from examples.five_home_block.five_home_block.output_mapping import standardize_results
 
 from .controller import HEMSControllerProtocol
 from .controllers.water_heater import WaterHeaterPredictiveController
 from .forecast import Forecast
-from .plotting import (
-    plot_ev,
-    plot_hvac,
-    plot_water_heater,
-    plot_water_heater_baseline,
-    plot_water_heater_optimization_plans,
-    plot_water_heater_power_comparison,
-    plot_water_usage_profile,
-    plot_whole_home_comparison,
-    water_heater_temperature_limits,
-)
 from .training import (
     HVACInternalGainRegime,
     WaterHeaterSensorLayout,
@@ -85,29 +72,6 @@ def water_heater_operating_summary(
     return pd.DataFrame(rows).set_index("scenario")
 
 
-@dataclass(frozen=True)
-class SingleHomeSimulationSummary:
-    """Outputs from a completed single-home HEMS simulation."""
-
-    home_id: str
-    standardized_results: pd.DataFrame
-    uncontrolled_results: pd.DataFrame
-    water_heater_sensors: pd.DataFrame
-    uncontrolled_water_heater_sensors: pd.DataFrame
-    water_heater_training_data: pd.DataFrame
-    uncontrolled_water_heater_training_data: pd.DataFrame
-    hvac_training_data: pd.DataFrame
-    uncontrolled_hvac_training_data: pd.DataFrame
-    water_heater_operating_costs: pd.DataFrame
-    controls: pd.DataFrame
-    data_directory: Path
-    figure_directory: Path
-    figure_files: tuple[Path, ...]
-    optimizer_plan_directory: Path | None
-    optimizer_plan_figure_files: tuple[Path, ...]
-    peak_power_kw: float
-
-
 class SingleHomeHEMSSimulation:
     """Run one selected five-home-block dwelling with stepwise HEMS controls."""
 
@@ -123,6 +87,10 @@ class SingleHomeHEMSSimulation:
         water_draw_file: Path | None = None,
         water_draw_start: pd.Timestamp | None = None,
         save_optimizer_plan_figures: bool = True,
+        ev_mobility_schedules: dict | None = None,
+        ev_backed_load: pd.Series | None = None,
+        unified_context: dict | None = None,
+        water_draw_anchor_time: pd.Timestamp | None = None,
     ):
         if initial_temperature_c is not None and (
             isinstance(initial_temperature_c, bool)
@@ -133,6 +101,9 @@ class SingleHomeHEMSSimulation:
         self.config = config
         self.home = home
         self.controller = controller
+        self.ev_mobility_schedules = ev_mobility_schedules
+        self.ev_backed_load = ev_backed_load
+        self.unified_context = unified_context
         self.water_heater_sensor_layout = (
             water_heater_sensor_layout or WaterHeaterSensorLayout()
         )
@@ -143,6 +114,8 @@ class SingleHomeHEMSSimulation:
         self.initial_temperature_c = initial_temperature_c
         self.save_optimizer_plan_figures = save_optimizer_plan_figures
         self.water_draw_data = None
+        self.water_draw_file = water_draw_file
+        self.water_draw_start = water_draw_start
         self.water_draw_metadata: dict[str, Any] = {}
         if water_draw_file is not None:
             from .water_forecast import DCHouseWaterData
@@ -152,9 +125,14 @@ class SingleHomeHEMSSimulation:
             if config.initialization_time is not None and pd.Timedelta(config.initialization_time) != pd.Timedelta(0):
                 raise ValueError("DCHouse water-draw replay requires zero initialization time")
             self.water_draw_data = DCHouseWaterData.from_csv(
-                water_draw_file, simulation_start=pd.Timestamp(config.start_time),
+                water_draw_file, simulation_start=pd.Timestamp(water_draw_anchor_time or config.start_time),
                 source_start=water_draw_start,
             )
+            # Keep the evaluation's source mapping while pre-rolling earlier.
+            # Forecast training must remain causal at the actual simulation start.
+            self.water_draw_data = replace(self.water_draw_data,
+                source_start=self.water_draw_data.source_time(pd.Timestamp(config.start_time)),
+                simulation_start=pd.Timestamp(config.start_time))
             self.water_draw_metadata = self.water_draw_data.metadata
         self.data_directory = config.output_directory / "data"
         self.raw_directory = self.data_directory / "raw"
@@ -184,12 +162,15 @@ class SingleHomeHEMSSimulation:
                 f"HEMS equipment controls at {timestamp} must be dictionaries: {invalid}"
             )
         water_heater_controls = controls.get("Water Heating", {})
-        unsupported = set(water_heater_controls) - {"Setpoint"}
+        unsupported = set(water_heater_controls) - {"Setpoint", "HP Duty Cycle", "ER Duty Cycle"}
         if unsupported:
             raise ValueError(
-                "Water Heating may only be controlled through Setpoint; "
+                "Water Heating supports Setpoint and binary HP/ER duty projection only; "
                 f"unsupported fields at {timestamp}: {sorted(unsupported)}"
             )
+        if "HP Duty Cycle" in water_heater_controls or "ER Duty Cycle" in water_heater_controls:
+            if water_heater_controls.get("HP Duty Cycle") not in (0, 1) or water_heater_controls.get("ER Duty Cycle") != 0:
+                raise ValueError("HPWH projection requires HP Duty Cycle 0/1 and ER Duty Cycle 0")
         return controls
 
     def _run_stepwise(
@@ -218,6 +199,15 @@ class SingleHomeHEMSSimulation:
             dwelling_config = replace(
                 self.config, duration=self.config.duration + water_controller.horizon,
             )
+        from .controllers.ev import EVMPCController
+        ev_horizon = max((device.horizon for device in getattr(self.controller, "device_controllers", ())
+                          if isinstance(device, EVMPCController)), default=pd.Timedelta(0))
+        if ev_horizon:
+            dwelling_config = replace(dwelling_config,
+                duration=max(dwelling_config.duration, self.config.duration + ev_horizon))
+        if self.unified_context:
+            dwelling_config = replace(dwelling_config, duration=max(dwelling_config.duration,
+                self.config.duration + self.unified_context["forecast_extension"]))
         dwelling = create_dwelling(
             dwelling_config,
             self.home,
@@ -225,17 +215,26 @@ class SingleHomeHEMSSimulation:
             water_nodes=self.water_heater_sensor_layout.model_nodes,
             water_heater_hp_only=self.water_heater_hp_only,
             initial_temp_setpoint=self.initial_temperature_c,
+            ev_mobility_schedules=self.ev_mobility_schedules,
         )
         water_heater = dwelling.get_equipment_by_end_use("Water Heating")
         heating = dwelling.get_equipment_by_end_use("HVAC Heating")
         cooling = dwelling.get_equipment_by_end_use("HVAC Cooling")
         envelope = dwelling.envelope
+        if self.unified_context:
+            from .backed_loads import attach_actual_load_cap
+            attach_actual_load_cap(dwelling, self.unified_context["backed_loads"])
         if water_heater.model.n_nodes != self.water_heater_sensor_layout.model_nodes:
             raise RuntimeError(
                 f"Expected {self.water_heater_sensor_layout.model_nodes} tank nodes, "
                 f"got {water_heater.model.n_nodes}"
             )
         schedule_file = raw_directory / f"{self.home.home_id}_schedule.csv"
+        if water_controller is not None and (water_controller.enforce_cycle_limit or water_controller.enforce_dwell_constraints):
+            for equipment in dwelling.equipment.values():
+                if equipment.end_use == "Water Heating":
+                    # Projected binary commands are refreshed at each plant step.
+                    equipment.ext_time_res = self.config.time_step
         schedule = pd.read_csv(schedule_file, parse_dates=["Time"]).set_index("Time")
         water_scenarios = None
         if self.water_draw_data is not None:
@@ -270,7 +269,15 @@ class SingleHomeHEMSSimulation:
             schedule,
             self.controller.electricity_price_for_step,
             water_scenarios=water_scenarios,
+            ev_schedules=self.ev_mobility_schedules,
+            backed_load_kw=self.ev_backed_load,
         )
+        if self.unified_context:
+            forecast.providers.update(self.unified_context.get("providers", {}))
+            if forecast.backed_load_kw is None:
+                # Twin/baseline EVs cannot discharge. Zero is decision-irrelevant,
+                # avoiding a circular dependency on the twin being constructed.
+                forecast = replace(forecast, backed_load_kw=pd.Series(0.0, index=schedule.index))
         previous_status: Mapping[str, Any] | None = None
         control_records: list[dict[str, Any]] = []
         sensor_records: list[dict[str, Any]] = []
@@ -294,6 +301,25 @@ class SingleHomeHEMSSimulation:
                         "Water Heating (L/min)", "Clothes Washer (L/min)", "Dishwasher (L/min)",
                     ]].to_dict()
                 dwelling.update_inputs(schedule_inputs=draw_inputs)
+                if self.unified_context and previous_status is None:
+                    previous_status = {
+                        **self.water_heater_sensor_layout.measure(water_heater.model.states),
+                        "Temperature - Indoor (C)": envelope.indoor_zone.temperature,
+                        "Water Heating Mode": water_heater.mode,
+                        "Water Heating Delivered (W)": 0.0,
+                    }
+                    if hasattr(water_heater, "hp_capacity_nominal"):
+                        previous_status["Water Heating Nominal Heat Pump Capacity (W)"] = water_heater.hp_capacity_nominal
+                if self.ev_mobility_schedules:
+                    previous_status = dict(previous_status or {})
+                    for ev in self.home.evs:
+                        if ev.hems is not None:
+                            equipment = dwelling.equipment[f"EV_{ev.vehicle_id}"]
+                            equipment.prepare_boundary(timestamp)
+                            previous_status[f"EV_{ev.vehicle_id} SOC (-)"] = equipment.soc
+                            previous_status[f"EV_{ev.vehicle_id} SOH (-)"] = equipment.soh
+                            previous_status[f"EV_{ev.vehicle_id} Capacity (kWh)"] = equipment.capacity
+                            previous_status[f"EV_{ev.vehicle_id} Parked"] = equipment.in_event
                 controls = (
                     self.controller.controls_for_step(
                         pd.Timestamp(timestamp),
@@ -362,6 +388,13 @@ class SingleHomeHEMSSimulation:
             raise
 
         raw, _, _ = dwelling.finalize()
+        battery_states = {name: equipment.battery_checkpoint()
+                          for name, equipment in dwelling.equipment.items()
+                          if hasattr(equipment, "battery_checkpoint")}
+        if battery_states:
+            # Battery-only checkpoint, not a complete dwelling/controller restart.
+            (self.data_directory / "ev_battery_checkpoints.json").write_text(json.dumps(
+                {"timestamp": str(dwelling.current_time), "batteries": battery_states}, indent=2))
         if raw is None:
             raise RuntimeError(f"{self.home.home_id}: OCHRE returned no results")
         controls = pd.DataFrame(control_records).set_index("timestamp")
@@ -403,272 +436,7 @@ class SingleHomeHEMSSimulation:
                 f"{self.home.home_id}: expected zero gas use in the all-electric home"
             )
 
-    def run(self) -> SingleHomeSimulationSummary:
-        """Execute the selected home and save data, controls, and figures."""
-        simulation_start = time.perf_counter()
-        for directory in (self.data_directory, self.raw_directory, self.figure_directory):
-            directory.mkdir(parents=True, exist_ok=True)
-
-        print(f"Running {self.home.home_id} with {type(self.controller).__name__}")
-        print(f"  {self.home.description}")
-        (
-            raw,
-            controls,
-            schedule,
-            sensors,
-            training_data,
-            hvac_training_data,
-        ) = self._run_stepwise(
-            apply_controls=True,
-            raw_directory=self.raw_directory,
-        )
-        if self.water_draw_metadata:
-            (self.data_directory / "water_draw_metadata.json").write_text(
-                json.dumps(self.water_draw_metadata, indent=2, default=str) + "\n",
-                encoding="utf-8",
-            )
-        mapped = standardize_results(
-            raw,
-            self.home.home_id,
-            numerical_tolerance_kw=self.config.numerical_tolerance_kw,
-        )
-        self._validate_results(raw, mapped.data)
-
-        print(f"Running matched uncontrolled baseline for {self.home.home_id}")
-        (
-            uncontrolled_raw,
-            _,
-            _,
-            uncontrolled_sensors,
-            uncontrolled_training_data,
-            uncontrolled_hvac_training_data,
-        ) = self._run_stepwise(
-            apply_controls=False,
-            raw_directory=self.raw_directory / "uncontrolled",
-        )
-        uncontrolled_mapped = standardize_results(
-            uncontrolled_raw,
-            self.home.home_id,
-            numerical_tolerance_kw=self.config.numerical_tolerance_kw,
-        )
-        self._validate_results(uncontrolled_raw, uncontrolled_mapped.data)
-
-        results_file = self.data_directory / f"{self.home.home_id}_standardized.csv"
-        uncontrolled_file = (
-            self.data_directory / f"{self.home.home_id}_uncontrolled_standardized.csv"
-        )
-        controls_file = self.data_directory / f"{self.home.home_id}_hems_controls.csv"
-        sensors_file = (
-            self.data_directory / f"{self.home.home_id}_water_heater_sensors.csv"
-        )
-        uncontrolled_sensors_file = self.data_directory / (
-            f"{self.home.home_id}_uncontrolled_water_heater_sensors.csv"
-        )
-        training_file = self.data_directory / (
-            f"{self.home.home_id}_water_heater_training_data.csv"
-        )
-        uncontrolled_training_file = self.data_directory / (
-            f"{self.home.home_id}_uncontrolled_water_heater_training_data.csv"
-        )
-        hvac_training_file = self.data_directory / (
-            f"{self.home.home_id}_hvac_training_data.csv"
-        )
-        uncontrolled_hvac_training_file = self.data_directory / (
-            f"{self.home.home_id}_uncontrolled_hvac_training_data.csv"
-        )
-        sensor_metadata_file = self.data_directory / "water_heater_sensor_layout.json"
-        mapping_file = self.data_directory / "output_mapping.json"
-        mapped.data.to_csv(results_file)
-        uncontrolled_mapped.data.to_csv(uncontrolled_file)
-        controls.to_csv(controls_file)
-        sensors.to_csv(sensors_file)
-        uncontrolled_sensors.to_csv(uncontrolled_sensors_file)
-        training_data.to_csv(training_file)
-        uncontrolled_training_data.to_csv(uncontrolled_training_file)
-        hvac_training_data.to_csv(hvac_training_file)
-        uncontrolled_hvac_training_data.to_csv(uncontrolled_hvac_training_file)
-        with sensor_metadata_file.open("w", encoding="utf-8") as stream:
-            json.dump(self.water_heater_sensor_layout.metadata(), stream, indent=2)
-        with mapping_file.open("w", encoding="utf-8") as stream:
-            json.dump(mapped.selected_columns, stream, indent=2)
-
-        price = controls["electricity_price_usd_per_kwh"]
-        water_heater_costs = water_heater_operating_summary(
-            mapped.data,
-            uncontrolled_mapped.data,
-            price,
-            self.config.time_step.total_seconds() / 3600,
-        )
-        water_heater_costs_file = (
-            self.data_directory / f"{self.home.home_id}_water_heater_operating_costs.csv"
-        )
-        water_heater_costs.to_csv(water_heater_costs_file)
-        figure_files = (
-            self.figure_directory / f"{self.home.home_id}_hvac.png",
-            self.figure_directory / f"{self.home.home_id}_water_heater.png",
-            self.figure_directory / f"{self.home.home_id}_ev.png",
-            self.figure_directory / f"{self.home.home_id}_whole_home_comparison.png",
-            self.figure_directory / f"{self.home.home_id}_water_heater_power_comparison.png",
-            self.figure_directory / f"{self.home.home_id}_water_usage_profile.png",
-        )
-        device_controllers = getattr(self.controller, "device_controllers", ())
-        water_heater_controller = next(
-            (
-                device
-                for device in device_controllers
-                if isinstance(device, WaterHeaterPredictiveController)
-            ),
-            None,
-        )
-        water_heater_only = (
-            len(device_controllers) == 1
-            and isinstance(device_controllers[0], WaterHeaterPredictiveController)
-        )
-        if water_heater_only:
-            figure_files += (
-                self.figure_directory / f"{self.home.home_id}_water_heater_baseline.png",
-            )
-        temperature_limits = None
-        if water_heater_only:
-            baseline_temperature_columns = [
-                *self.water_heater_sensor_layout.sensor_columns,
-                "water_heater_setpoint_temperature_c",
-            ]
-            temperature_limits = water_heater_temperature_limits(
-                sensors,
-                raw.loc[
-                    mapped.data.index,
-                    "Water Heating Deadband Upper Limit (C)",
-                ],
-                uncontrolled_training_data[baseline_temperature_columns],
-            )
-        plot_hvac(
-            mapped.data,
-            schedule,
-            price,
-            self.home.home_id,
-            figure_files[0],
-            self.config.plot_dpi,
-        )
-        plot_water_heater(
-            mapped.data,
-            raw,
-            sensors,
-            price,
-            self.home.home_id,
-            figure_files[1],
-            self.config.plot_dpi,
-            water_usage=training_data["water_heater_draw_l_per_min"],
-            temperature_limits=temperature_limits,
-        )
-        plot_ev(
-            mapped.data,
-            raw,
-            price,
-            self.home.home_id,
-            figure_files[2],
-            self.config.plot_dpi,
-        )
-        plot_whole_home_comparison(
-            mapped.data,
-            uncontrolled_mapped.data,
-            price,
-            self.home.home_id,
-            figure_files[3],
-            self.config.plot_dpi,
-        )
-        plot_water_heater_power_comparison(
-            mapped.data,
-            uncontrolled_mapped.data,
-            price,
-            self.home.home_id,
-            figure_files[4],
-            self.config.plot_dpi,
-            operating_summary=water_heater_costs,
-        )
-        plot_water_usage_profile(
-            training_data,
-            uncontrolled_training_data,
-            self.home.home_id,
-            figure_files[5],
-            self.config.plot_dpi,
-        )
-        if water_heater_only:
-            plot_water_heater_baseline(
-                uncontrolled_training_data,
-                self.water_heater_sensor_layout.sensor_columns,
-                self.home.home_id,
-                figure_files[-1],
-                self.config.plot_dpi,
-                water_usage=uncontrolled_training_data[
-                    "water_heater_draw_l_per_min"
-                ],
-                temperature_limits=temperature_limits,
-            )
-        optimizer_plan_directory = None
-        optimizer_plan_figure_files: tuple[Path, ...] = ()
-        if water_heater_controller is not None:
-            for name in ("solve_history", "objective_component_history", "scenario_diagnostics_history"):
-                history = getattr(water_heater_controller, name, None)
-                if isinstance(history, pd.DataFrame) and not history.empty:
-                    history.to_csv(self.data_directory / f"optimization_{name}.csv", index=False)
-        if water_heater_controller is not None and self.save_optimizer_plan_figures:
-            optimizer_plan_directory = (
-                self.figure_directory / "water_heater_optimizer_plans"
-            )
-            optimizer_plan_figure_files = plot_water_heater_optimization_plans(
-                water_heater_controller.optimization_plans,
-                optimizer_plan_directory,
-                self.config.plot_dpi,
-            )
-
-        summary = SingleHomeSimulationSummary(
-            home_id=self.home.home_id,
-            standardized_results=mapped.data,
-            uncontrolled_results=uncontrolled_mapped.data,
-            water_heater_sensors=sensors,
-            uncontrolled_water_heater_sensors=uncontrolled_sensors,
-            water_heater_training_data=training_data,
-            uncontrolled_water_heater_training_data=uncontrolled_training_data,
-            hvac_training_data=hvac_training_data,
-            uncontrolled_hvac_training_data=uncontrolled_hvac_training_data,
-            water_heater_operating_costs=water_heater_costs,
-            controls=controls,
-            data_directory=self.data_directory,
-            figure_directory=self.figure_directory,
-            figure_files=figure_files,
-            optimizer_plan_directory=optimizer_plan_directory,
-            optimizer_plan_figure_files=optimizer_plan_figure_files,
-            peak_power_kw=float(mapped.data["total_electric_power_kw"].max()),
-        )
-        print("\nSingle-home HEMS simulation complete")
-        print(f"  Home: {summary.home_id}")
-        print(f"  Timesteps: {len(summary.standardized_results)}")
-        for device in getattr(self.controller, "device_controllers", ()):
-            for kind, durations in getattr(device, "solve_durations_s", {}).items():
-                if durations:
-                    print(
-                        f"  {kind} solve time: {np.mean(durations):.3f} s average "
-                        f"over {len(durations)} calls"
-                    )
-        print(f"  Total simulation time: {time.perf_counter() - simulation_start:.2f} s")
-        print(f"  Peak power: {summary.peak_power_kw:.2f} kW")
-        print("  Water-heater operation:")
-        for scenario, values in summary.water_heater_operating_costs.iterrows():
-            print(
-                f"    {scenario}: {values['energy_kwh']:.2f} kWh, "
-                f"{values['average_power_kw']:.3f} kW average, "
-                f"${values['operating_cost_usd']:.2f}"
-            )
-        print(f"  Water-heater operating costs: {water_heater_costs_file}")
-        print(f"  Data and HEMS controls: {summary.data_directory}")
-        print("  Figures:")
-        for figure_file in summary.figure_files:
-            print(f"    {figure_file}")
-        if summary.optimizer_plan_directory is not None:
-            print(
-                "  Water-heater optimizer plans: "
-                f"{summary.optimizer_plan_directory} "
-                f"({len(summary.optimizer_plan_figure_files)} figures)"
-            )
-        return summary
+    def run(self):
+        """Adapt legacy callers to the same three-case pipeline as the unified CLI."""
+        from .legacy_adapter import run_legacy
+        return run_legacy(self)

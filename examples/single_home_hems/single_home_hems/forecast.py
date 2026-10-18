@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Protocol
 
 import pandas as pd
@@ -46,6 +46,17 @@ class Forecast:
 
     data: pd.DataFrame
     water_scenarios: ScenarioWaterForecast | None = None
+    ev_schedules: dict = field(default_factory=dict)
+    backed_load_kw: pd.Series | None = None
+    providers: dict = field(default_factory=dict)
+    # Known tariff, separate from the finite device forecast. Retained when an
+    # external forecast replaces load/mobility/price rows; not a realized tail.
+    tariff_price_at: Callable[[pd.Timestamp], float] | None = None
+
+    def for_device(self, name, timestamp, horizon):
+        """Route a device forecast; leave shared measured history/tariff available."""
+        provider = self.providers.get(name)
+        return self if provider is None else provider.at(timestamp, self, horizon)
 
     @classmethod
     def from_schedule(
@@ -54,6 +65,8 @@ class Forecast:
         price_at: Callable[[pd.Timestamp], float],
         *,
         water_scenarios: ScenarioWaterForecast | None = None,
+        ev_schedules: dict | None = None,
+        backed_load_kw: pd.Series | None = None,
     ) -> "Forecast":
         """Build a forecast from the deterministic OCHRE input schedule."""
         if not isinstance(schedule.index, pd.DatetimeIndex):
@@ -66,7 +79,9 @@ class Forecast:
 
         data = schedule.copy()
         data[PRICE_COLUMN] = [price_at(pd.Timestamp(time)) for time in data.index]
-        return cls(data=data, water_scenarios=water_scenarios)
+        return cls(data=data, water_scenarios=water_scenarios,
+                   ev_schedules=ev_schedules or {}, backed_load_kw=backed_load_kw,
+                   tariff_price_at=price_at)
 
     def window(
         self,
