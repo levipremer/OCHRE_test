@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
+import numpy as np
 
 from test.test_ev_v2h import ROOT, schedule, vehicle, forecast
 from examples.single_home_hems.single_home_hems import ev_study as study
@@ -41,7 +42,9 @@ class EVStudyTests(unittest.TestCase):
         rows = pd.DataFrame({"case": ["all_baseline", "non_v2h_twin", "advanced"],
             "home_id": "home_01", "device": "whole_home", "cost_usd": [10, 9, 8],
             "reference_degradation_cost_usd": [2, 2.5, 3], "final_soc": [.4, .5, .6],
-            "mean_solve_seconds": [0, .1, .2], "max_solve_seconds": [0, .2, .4]})
+            "mean_solve_seconds": [0, .1, .2], "max_solve_seconds": [0, .2, .4],
+            "initial_stored_energy_kwh": [10, 10, 11], "final_stored_energy_kwh": [12, 13, 11],
+            "initial_energy_value_usd_per_kwh": .2, "final_energy_value_usd_per_kwh": .2})
         baseline_economics(rows).to_csv(path/"performance.csv", index=False)
 
     def test_stage_freezes_schedules_across_socs_without_execution(self):
@@ -97,6 +100,8 @@ class EVStudyTests(unittest.TestCase):
         self.assertTrue(summary.loc[summary.case.eq("advanced"), "net_savings_usd_mean"].eq(1).all())
         self.assertTrue(summary.loc[summary.case.eq("non_v2h_twin"), "net_savings_usd_mean"].eq(.5).all())
         self.assertTrue(summary.net_savings_usd_std.eq(0).all())
+        self.assertTrue(np.allclose(summary.loc[summary.case.eq("advanced"), "energy_adjusted_net_savings_usd_mean"], .6))
+        self.assertTrue(np.allclose(summary.loc[summary.case.eq("non_v2h_twin"), "energy_adjusted_net_savings_usd_mean"], .7))
         self.assertTrue((path.parent/"figures/advanced_formulation_savings.png").exists())
         job_id = next(iter(study.read_json(path)["jobs"]))
         status = study.read_json(path.parent/"jobs"/job_id/"status.json")
@@ -116,6 +121,28 @@ class EVStudyTests(unittest.TestCase):
             study.run_study(path)
         result = pd.read_csv(path.parent/"study_runs.csv")
         self.assertEqual(result.attempt.max(), 2)
+
+    def test_forecast_metrics_propagate_without_pooling_control_cases(self):
+        self.spec["initial_socs"] = [.4]
+        path, _ = self.stage()
+
+        def run_with_scores(config, selected, *, mobility_by_home):
+            self.fake_run(config, selected, mobility_by_home=mobility_by_home)
+            output = config.neighborhood.output_directory/"data/performance.csv"
+            whole = pd.read_csv(output)
+            ev = whole.assign(device="EV_01A", forecast_issuance_count=[np.nan, 2, 2],
+                forecast_brier_home=[np.nan, .1, .3], forecast_no_scenarios_count=[np.nan, 0, 1])
+            pd.concat([whole, ev], ignore_index=True).to_csv(output, index=False)
+
+        with patch.object(study, "run_unified", side_effect=run_with_scores):
+            study.run_study(path)
+        summary = pd.read_csv(path.parent/"paired_summary.csv")
+        ev = summary.loc[summary.device.eq("EV_01A")]
+        self.assertTrue(ev.loc[ev.case.eq("advanced"), "forecast_brier_home_mean"].eq(.3).all())
+        self.assertTrue(ev.loc[ev.case.eq("non_v2h_twin"), "forecast_brier_home_mean"].eq(.1).all())
+        self.assertTrue(ev.loc[ev.case.eq("all_baseline"), "forecast_brier_home_mean"].isna().all())
+        for case in ("advanced", "non_v2h_twin"):
+            self.assertTrue((path.parent/"figures"/f"{case}_EV_01A_formulation_forecast_accuracy.png").exists())
 
     def test_frozen_inputs_unknown_ids_and_changed_environment(self):
         path, _ = self.stage()
@@ -148,10 +175,10 @@ class EVStudyTests(unittest.TestCase):
         self.assertEqual(home["simulation"]["cooldown_hours"], .25)
         self.assertEqual(study.read_json(self.spec_file)["duration_hours"], 120)
 
-    def test_staged_pilot_is_thirty_paired_jobs_with_five_objectives(self):
+    def test_pilot_is_forty_eight_paired_jobs_with_eight_objectives(self):
         spec = study.read_json(ROOT/"examples/single_home_hems/config/ev_study_pilot.json")
         study.validate_study(spec)
-        self.assertEqual(len(spec["configurations"]), 5)
+        self.assertEqual(len(spec["configurations"]), 8)
         self.assertEqual(len(spec["schedule_cases"]), 6)
         self.assertEqual(spec["warmup_hours"], 24)
         self.assertEqual(spec["cooldown_hours"], 24)
@@ -159,8 +186,12 @@ class EVStudyTests(unittest.TestCase):
         self.assertEqual(spec["initial_socs"], [.4])
         self.assertEqual(spec["common_ev_controls"]["comfort_weight"], 1000)
         self.assertEqual(spec["common_ev_controls"]["persistence_weight"], 0)
-        self.assertEqual([c["ev_controls"]["health_soc_weight"] for c in spec["configurations"]], [0, 0, 1000, 1000, 1000])
-        self.assertEqual([c["ev_controls"]["formulation"] for c in spec["configurations"]], ["convex"]+["milp"]*4)
+        self.assertEqual([c["ev_controls"]["health_soc_weight"] for c in spec["configurations"]], [0, 0]+[1000]*6)
+        self.assertEqual([c["ev_controls"]["formulation"] for c in spec["configurations"]], ["convex", "milp"]+["convex"]*3+["milp"]*3)
+        self.assertTrue(spec["common_ev_controls"]["enforce_terminal_soc"])
+        self.assertNotIn("terminal_soc_weight", spec["common_ev_controls"])
+        if spec["common_ev_controls"]["solver"] == "SCIPY":
+            self.assertEqual(spec["common_ev_controls"]["solver_options"], {})
 
     def test_identical_mobility_replayed_across_months(self):
         second = dict(self.spec["schedule_cases"][0], id="feb_pair", start_time="2018-02-03T00:00:00")
@@ -205,12 +236,15 @@ class EVStudyTests(unittest.TestCase):
                 pd.DataFrame({"electricity_price_usd_per_kwh": [.1, .2, .3]}, index=index).to_csv(folder/"controls.csv")
                 pd.DataFrame({"total_electric_power_kw": [3, 4, 2]}, index=index).to_csv(folder/"standardized.csv")
                 metrics.append(dict(configuration_id=variant, study_case="paired", case=case,
-                    device="EV_01A", capacity_kwh=60))
+                    device="EV_01A", capacity_kwh=60, forecast_issuance_count=3,
+                    forecast_brier_home=.1 if case == "advanced" else .3,
+                    forecast_arrival_energy_mae_kwh=.2, forecast_no_scenarios_fraction=0))
         plot_study(self.directory, manifest, statuses, pd.DataFrame(metrics))
         for case in ("advanced", "non_v2h_twin"):
             path = self.directory/"figures"/f"paired_{case}_formulations.png"
             self.assertTrue(path.exists())
             self.assertGreater(path.stat().st_size, 1000)
+            self.assertTrue((self.directory/"figures"/f"{case}_EV_01A_formulation_forecast_accuracy.png").exists())
 
     def test_none_and_multicut_alias_preserve_objectives(self):
         for method, expected in (("none", False), ("rainflow_multicut", True)):

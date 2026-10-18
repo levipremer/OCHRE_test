@@ -93,6 +93,8 @@ class ScenarioEVForecast:
         self.forecast_length = pd.Timedelta(hours=control.get("forecast_hours", control["horizon_hours"]))
         self.settings = scenario_settings(control["forecast"], self.control_minutes, control["horizon_hours"])
         self.history = []
+        # Store final forecasts, not future truth. Scoring happens after simulation.
+        self.issued_forecasts = []
 
     def at(self, timestamp, realized, horizon):
         timestamp = pd.Timestamp(timestamp)
@@ -160,12 +162,13 @@ class ScenarioEVForecast:
                 break
         diagnostics = dict(timestamp=str(timestamp), method=method, requested_count=cfg["scenario_count"],
             mobility_replay_metadata=mobility.metadata,
-            scenario_count=len(selected), lookback_days=cfg["lookback_days"],
+            scenario_count=len(selected), no_scenarios_selected=not selected, lookback_days=cfg["lookback_days"],
             forecast_hours=horizon.total_seconds()/3600, knn_history_hours=cfg["knn_history_hours"],
             candidate_count=len(ranked), incomplete_bout_exclusions=excluded,
             overlap_rejections=overlap_rejected, prefix_control_intervals=cfg["prefix_control_intervals"],
             probability_policy="uniform", backed_load_source="shared non-V2H twin trajectory")
         if not selected:
+            self.issued_forecasts.append((timestamp, horizon, ()))
             self.history.append(dict(diagnostics, fallback_reason="no_complete_historical_scenarios"))
             raise NoEVScenarios("No complete non-overlapping historical EV scenarios")
         paths, forecasts, ids, records = [], [], [], []
@@ -186,5 +189,6 @@ class ScenarioEVForecast:
             forecasts.append(replace(realized, ev_schedules={**realized.ev_schedules, self.vehicle_id: path}, providers={}))
         diagnostics.update(candidate_ids=ids, candidates=records, optimization_probability=1/len(paths))
         self.history.append(diagnostics)
+        self.issued_forecasts.append((timestamp, horizon, tuple(paths)))
         return EVScenarioSet(timestamp, tuple(paths), tuple(f.backed_load_kw for f in forecasts),
                              tuple(forecasts), tuple(ids), diagnostics)

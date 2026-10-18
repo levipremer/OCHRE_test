@@ -2,11 +2,10 @@
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
 from .ev_metrics import ev_operating_state
-from .unified_plots import _finish
+from .unified_plots import _finish, plot_metric_bars, FORECAST_METRICS, SAVINGS_METRICS
 
 
 def plot_study(output, manifest, statuses, paired_metrics):
@@ -48,7 +47,7 @@ def plot_study(output, manifest, statuses, paired_metrics):
                 axes[4].step(raw.index, mode.map({"away": -2, "discharging": -1, "idle": 0, "charging": 1}),
                              where="post", color=color, label=label)
                 axes[5].plot(mapped.index, mapped.total_electric_power_kw, color=color, label=label)
-                # Stored energy change exposes unpriced evaluation-boundary energy.
+                # Show inventory movement alongside the separately adjusted savings.
                 capacity = paired_metrics.loc[(paired_metrics.study_case == case_id) &
                     (paired_metrics.configuration_id == label) &
                     (paired_metrics.device == name), "capacity_kwh"] if "capacity_kwh" in paired_metrics else pd.Series(dtype=float)
@@ -78,24 +77,14 @@ def plot_study(output, manifest, statuses, paired_metrics):
         return
     for control_case in ("non_v2h_twin", "advanced"):
         data = paired_metrics.loc[paired_metrics.case.eq(control_case) & paired_metrics.device.eq("whole_home")]
-        if data.empty:
-            continue
-        metrics = ["operating_cost_savings_usd", "degradation_cost_savings_usd", "net_savings_usd"]
-        fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
-        labels = sorted(data.configuration_id.unique())
-        for axis, metric in zip(axes, metrics):
-            group = data.groupby("configuration_id")[metric]
-            means, stds = group.mean().reindex(labels), group.std().reindex(labels).fillna(0)
-            x = np.arange(len(labels))
-            axis.bar(x, means, yerr=stds, capsize=4, color=[colors[v] for v in labels], alpha=.65)
-            for i, label in enumerate(labels):
-                values = data.loc[data.configuration_id.eq(label), metric]
-                axis.scatter(np.full(len(values), i), values, color="black", s=15, zorder=3)
-            axis.axhline(0, color="grey", linewidth=.8)
-            axis.set_ylabel(metric.replace("_", " "))
-            axis.grid(axis="y", alpha=.2)
-        axes[0].set_title(f"{control_case}: paired whole-home savings (mean ± sample SD; dots = cases)")
-        axes[-1].set_xticks(np.arange(len(labels)), labels, rotation=20, ha="right")
-        fig.tight_layout()
-        fig.savefig(directory/f"{control_case}_formulation_savings.png", dpi=100)
-        plt.close(fig)
+        if not data.empty:
+            plot_metric_bars(data, SAVINGS_METRICS, "configuration_id",
+                f"{control_case}: paired whole-home savings (mean ± sample SD; dots = cases)",
+                directory/f"{control_case}_formulation_savings.png")
+        ev_rows = paired_metrics.loc[paired_metrics.case.eq(control_case) & paired_metrics.device.str.startswith("EV_")]
+        if "forecast_issuance_count" in ev_rows:
+            for device, rows in ev_rows.groupby("device"):
+                if rows.forecast_issuance_count.notna().any():
+                    plot_metric_bars(rows, FORECAST_METRICS, "configuration_id",
+                        f"{control_case} / {device}: paired final-forecast scores (mean ± SD; dots = cases)",
+                        directory/f"{control_case}_{device}_formulation_forecast_accuracy.png")

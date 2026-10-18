@@ -205,8 +205,11 @@ Baseline degradation is included, so all-baseline net savings is exactly zero.
 The old `savings_usd`/`net_profit_usd` columns are removed from new outputs;
 previously saved experiments are not rewritten.
 Whole-home degradation sums its EVs; no thermal-equipment aging is invented.
-Reported savings do not include terminal-energy credits, even when the OCP
-terminal valuation is active: inspect final SOC before interpreting savings.
+`net_savings_usd` excludes inventory credits. The separate
+`energy_adjusted_net_savings_usd` accounts for differences from baseline in actual
+starting/ending stored energy, valued at common boundary daily-minimum tariffs.
+This reporting adjustment is independent of the OCP terminal option; see
+[output accounting](pipeline.md#outputs). Inspect trip shortfalls alongside savings.
 
 `rainflow_multicut` aliases the existing `rainflow` outer-loop formulation.
 `degradation_method="none"` explicitly removes the OCP degradation term even if

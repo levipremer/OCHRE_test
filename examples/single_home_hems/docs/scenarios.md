@@ -128,7 +128,12 @@ license limit, not evidence that the scenario formulation is infeasible.
 Existing plots, metrics and phase masks remain. Per case/EV:
 
 - `EV_ID_forecast_issuance.csv`: selected origins, kNN distances/filter tiers,
-  counts, exclusions, uniform probability, prefix and deferred-distance metadata.
+  counts, exclusions, uniform probability, prefix and deferred-distance metadata;
+  `no_scenarios_selected` explicitly flags empty selection/fallback.
+- `EV_ID_forecast_errors.csv`: per-issuance scores and eligibility/count diagnostics.
+  `EV_ID_forecast_errors_by_lead.csv`: detailed control-bin targets and errors.
+  Accuracy summaries and lead plots compare cases using the **final forecast,
+  including its persistence prefix**, never separate prefix/tail scores.
 - `EV_ID_plans.json`: aggregate objective plus all scenario states/powers/costs.
   Legacy top-level trajectory fields represent the explicitly labeled first
   scenario; they are not ensemble averages or actual outcomes.
@@ -137,5 +142,20 @@ Existing plots, metrics and phase masks remain. Per case/EV:
 - Existing comparison/report files keep baseline, twin and advanced separate;
   warmup/cooldown remain outside scoring. No research-duration study is launched.
 
-Regression tests: `test/test_ev_scenario.py`. See [scenario validation](validation/ev_scenario_2026-10-17.md) for
+Scoring runs after simulation against actual distance-derived driving kWh; it
+cannot influence scenario selection. Home Brier uses ensemble home probability;
+false-home/false-away rates average mismatches over all scenario-timestep pairs.
+Arrival-energy MAE averages absolute scenario errors, not error of ensemble mean.
+State is sampled at each control-bin start; energy sums arrivals within that bin.
+Timestep summaries are duration-weighted and require issuance/targets inside
+evaluation. Horizon energy MAE, min/max-envelope coverage/width, and next-new-trip
+energy MAE require the entire forecast inside evaluation. These average across
+eligible issuances; counts are retained. The ongoing trip at issuance is excluded
+from next-new-trip scoring. No observed next trip gives unavailable MAE; missing
+predicted trips count as zero energy when truth exists, with missing/false-prediction
+fractions reported. Empty ensembles have a flag/count, never zero-error scores.
+Baseline/non-scenario controllers have unavailable ensemble metrics. Warmup and
+cooldown are excluded. Run/study summaries keep twin and advanced separate.
+
+Regression tests: `test/test_ev_scenario.py`, `test/test_ev_reporting.py`. See [scenario validation](validation/ev_scenario_2026-10-17.md) for
 the executed validation and any existing repository-wide limitations.

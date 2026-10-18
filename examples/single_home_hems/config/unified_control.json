@@ -144,7 +144,7 @@
           "health_soc_min": 0.2,
           "health_soc_max": 0.8,
           "comfort_soc_min": 0.4,
-          "enforce_terminal_soc": true,
+          "enforce_terminal_soc": false,
           "enforce_discharge_budget": false,
           "discharge_budget_soc": 1,
           "mip_relative_gap": 0.05,

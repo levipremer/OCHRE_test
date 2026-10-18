@@ -91,6 +91,8 @@ class EVScenarioForecastTests(unittest.TestCase):
         f = replace(forecast(ev, schedule()), ev_schedules={ev.vehicle_id: historical()})
         with self.assertRaises(NoEVScenarios):
             provider.at(schedule().start, f, pd.Timedelta(hours=1))
+        self.assertTrue(provider.history[-1]["no_scenarios_selected"])
+        self.assertEqual(provider.issued_forecasts[-1][2], ())
         c = EVMPCController(ev)
         c._solve(schedule().start, .5, replace(f, providers={c.equipment_name: provider}))
         self.assertTrue(c.fallback)
@@ -318,11 +320,20 @@ class EVScenarioPipelineTests(unittest.TestCase):
             result = run_home(u, home, {ev.vehicle_id: mobility})
             self.assertEqual(tuple(result.cases), CASES)
             name = f"EV_{ev.vehicle_id}"
+            self.assertTrue(result.metrics.energy_adjusted_net_savings_usd.notna().all())
+            self.assertTrue((Path(tmp)/home.home_id/"figures"/f"{name}_forecast_accuracy.png").exists())
+            self.assertTrue((Path(tmp)/home.home_id/"figures/whole_home_savings_comparison.png").exists())
             for case in CASES:
                 row = result.solver_stats.loc[result.solver_stats.case.eq(case) & result.solver_stats.device.eq(name)].iloc[0]
                 self.assertEqual(row.attempts, 0 if case == "all_baseline" else 2)
                 self.assertEqual(row.failures, 0)
                 raw = result.cases[case]["raw"]
+                battery = result.metrics.loc[result.metrics.case.eq(case) & result.metrics.device.eq(name)].iloc[0]
+                total = result.metrics.loc[result.metrics.case.eq(case) & result.metrics.device.eq("whole_home")].iloc[0]
+                self.assertAlmostEqual(battery.initial_stored_energy_kwh, raw[f"{name} Start Stored Energy (kWh)"].iloc[0])
+                self.assertAlmostEqual(battery.final_stored_energy_kwh, raw[f"{name} End Stored Energy (kWh)"].iloc[-1])
+                self.assertAlmostEqual(total.energy_inventory_adjustment_usd, battery.energy_inventory_adjustment_usd)
+                self.assertAlmostEqual(battery.initial_energy_value_usd_per_kwh, .15)
                 self.assertTrue(raw[f"{name} End SOC (-)"].between(0, 1).all())
                 self.assertTrue((-raw[f"{name} Electric Power (kW)"] <= raw[f"{name} Actual Backed Load (kW)"]+1e-7).all())
                 if case != "all_baseline":
@@ -331,6 +342,12 @@ class EVScenarioPipelineTests(unittest.TestCase):
                     self.assertEqual(len(plans[0]["scenarios"]), 2)
                     issuance = pd.read_csv(directory/f"{name}_forecast_issuance.csv")
                     self.assertTrue(issuance.scenario_count.eq(2).all())
+                    self.assertFalse(issuance.no_scenarios_selected.any())
+                    errors = pd.read_csv(directory/f"{name}_forecast_errors.csv")
+                    self.assertEqual(len(errors), 2)
+                    self.assertFalse(errors.full_horizon.any())
+                    self.assertTrue(errors.horizon_energy_mae_kwh.isna().all())
+                    self.assertTrue((directory/f"{name}_forecast_errors_by_lead.csv").exists())
                     solves = pd.read_csv(directory/f"{name}_solve_history.csv")
                     self.assertTrue(solves.scenario_count.eq(2).all())
 

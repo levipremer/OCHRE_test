@@ -2,7 +2,7 @@
 
 ## Status
 
-The driver and five objective variants are implemented. Smoothed rainflow and hh
+The driver and eight objective variants are implemented. Smoothed rainflow and hh
 are deferred by user request and excluded from the current pilot. NMC SOC-aware
 additive rainflow is the common evaluation model, not an OCP option. Earlier
 staged snapshots retain their old calibration; use a new output directory and
@@ -16,7 +16,7 @@ The [pilot configuration](../config/ev_study_pilot.json) is editable JSON with
 `_comments` metadata. Paths below refer to the repository or example root.
 It references the standalone unified home and control documents. One home and one
 Audi EV use January 3-8 and February 3-8, 2018 (exclusive end), seeds 41/42/43,
-and initial SOC 0.4. Six paired cases times five formulations = **30 unified jobs**,
+and initial SOC 0.4. Six paired cases times eight formulations = **48 unified jobs**,
 each saving all-baseline, non-V2H twin and advanced results. HPWH/HVAC stay baseline;
 EV V2H remains enabled and forecasts are perfect. Evaluation is 120 hours, preceded
 by 24-hour warm-up and followed by 24-hour cooldown. The horizon is 12 hours,
@@ -26,16 +26,23 @@ control interval 15 minutes, and plant interval remains one minute.
 month's anchor and shifts its entire timeline to the other month, including
 pre/post-roll and forecast tails. Vehicle, trip distances, relative event times,
 and availability are identical. February deliberately sacrifices weekday alignment.
-All five formulations reuse these frozen traces; there is no Audi wrapping.
+All eight formulations reuse these frozen traces; there is no Audi wrapping.
 
-The objectives are convex electricity + comfort; MILP electricity + comfort;
-MILP adding health SOC; then adding throughput or multicut rainflow to that MILP.
+Both convex and MILP compare electricity + comfort; adding health SOC; then
+adding throughput or multicut rainflow degradation to the health variant.
 Comfort weight is 1000 in every variant; its cost now averages pre-departure
 shortfalls only (zero when no departure is forecast). Health SOC weight is zero for the first two,
-1000 for the last three. Overall health/electricity weights are 1. Health bounds
-are 0.2/0.8, comfort floor 0.4. Persistence, dwell/caps, discharge-budget and
-terminal terms are off. Baseline/fallback charges to 0.4. GUROBI uses fixed Seed=0
-and Threads=1. The study retains a 300-second OCP budget and 5% MILP objective gap,
+1000 for the remaining six. Overall health/electricity weights are 1. Health bounds
+are 0.2/0.8, comfort floor 0.4. Persistence, dwell/caps and discharge-budget terms
+are off. Terminal energy valuation is enabled: `v*(e0-eN)/N`, using the
+daily-minimum tariff with no separate weight. Baseline/fallback charges to 0.4.
+The current study uses license-free SCIPY/HiGHS with empty solver options.
+GUROBI remains supported with a valid local license; use Seed=0 and Threads=1
+only for that backend. A copied machine-bound academic license cannot work on a
+different HostID: retrieve a license for this computer using Gurobi's `grbgetkey`,
+preferably stored outside the venv at the user-home default location. Verify it
+before switching/staging a GUROBI study.
+The study retains a 300-second OCP budget and 5% MILP objective gap,
 with the approved separate rainflow envelope accuracy of $1e-6 + 0.1% of
 incremental aging dollars, maximum 100 master solves.
 
@@ -79,7 +86,7 @@ long-horizon aging accuracy, trips absent from that brief window, or new methods
 
 Later, explicitly execute selected implemented configurations with `--run` and
 `--configurations convex_comfort milp_comfort`. `--cases` accepts exact IDs
-from the manifest. An unfiltered `--run` executes all five variants and is therefore
+from the manifest. An unfiltered `--run` executes all eight variants and is therefore
 a full study, not a smoke test. The CLI rejects unsupported methods without substitution.
 
 ## Reproducibility and extension
@@ -96,8 +103,9 @@ a full study, not a smoke test. The CLI rejects unsupported methods without subs
 - Re-running resumes only verified complete jobs. Failed/interrupted attempts are
   preserved; a retry gets another attempt directory. Do not edit the manifest or
   generated files; edit the study definition and stage a new revision as needed.
-- GUROBI's seed is fixed and one thread is requested. This improves reproducibility
-  but does not promise bitwise-identical numerical results across machines.
+- For GUROBI, fixed seed and one thread improve reproducibility but do not
+  promise bitwise-identical numerical results across machines. Those options
+  do not apply to the current SCIPY backend.
 - No cross-configuration baseline caching is implemented yet. Repeating baselines
   costs time but avoids unsafe sharing. Every job saves all three case outputs.
 
@@ -121,7 +129,10 @@ Charge/discharge starts are distinct from throughput equivalent full cycles.
 
 `figures/` adds per-mobility-case cross-formulation overlays (availability, SOC,
 price, EV power/mode, whole-home power, stored-energy change) and paired savings
-bar charts with per-case dots and sample standard deviations. Advanced and
+bar charts with per-case dots and sample standard deviations, including inventory
+correction and energy-adjusted net savings. Final-ensemble forecast accuracy bars
+compare formulations when scenario controls are present (prefix included).
+Advanced and
 non-V2H have separate figures. Existing three-case plots are unchanged. Overlays
 show completion coverage; savings plots use the common completed case intersection.
 Run-level `raw_results_all_phases.csv`, `controls_all_phases.csv`, solve/action
@@ -132,8 +143,15 @@ Net savings = (baseline operating cost - case operating cost) +
 (baseline NMC reference degradation cost - case NMC reference degradation cost). Baseline net savings
 is zero. Reported degradation is unweighted. Final SOC/stored energy, unserved
 trips, health/comfort violations, starts, mean/p95/max solve time, detailed gaps,
-timeouts and fallback history remain available. There is no terminal-energy
-credit or silent exclusion of failed solves from completed simulations.
+timeouts and fallback history remain available. The separate
+`energy_adjusted_net_savings_usd` adds `vT*(ET_case-ET_baseline) -
+v0*(E0_case-E0_baseline)`, using actual faded-capacity chemical energy at evaluation
+boundaries and common first/last daily-minimum tariff values. It is independent of
+the terminal objective; archived missing boundary data remains unavailable.
+Forecast errors/coverage and no-scenario counts also propagate to study summaries;
+see [score definitions](scenarios.md#outputs-and-validation). Run-level forecast
+error CSVs retain issuance/lead detail. There is no silent exclusion of failed
+solves from completed simulations.
 
 ## Deferred optimizer work
 

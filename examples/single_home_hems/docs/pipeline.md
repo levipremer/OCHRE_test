@@ -155,6 +155,8 @@ Each output root contains:
 - `data/comparison.csv`, `performance.csv`, `solver_stats.csv`,
   `solve_history.csv`, and case-wise aggregate power.
 - Per-home, per-case data/figures, controller plans and issuance/solve/action histories.
+- EV forecast-error CSVs, final-ensemble accuracy/lead plots, and EV/whole-home
+  savings comparison plots (see [scenario scores](scenarios.md#outputs-and-validation)).
 - `raw_results_all_phases.csv`, `controls_all_phases.csv`, and
   `evaluation_mask.csv` retaining warmup/evaluation/cooldown/forecast-tail context.
 
@@ -165,5 +167,13 @@ not a complete dwelling/controller restart.
 
 Net savings = baseline operating cost - case operating cost + baseline reference
 aging cost - case reference aging cost. Twin and advanced remain separate.
-No terminal-energy credit is included; compare final stored energy and trip
-shortfalls alongside savings. Cycle starts and equivalent full cycles are distinct.
+`net_savings_usd` retains that definition. Separately,
+`energy_adjusted_net_savings_usd = net_savings_usd + energy_inventory_adjustment_usd`,
+where the correction is `vT*(ET_case-ET_baseline) - v0*(E0_case-E0_baseline)`.
+Energies are actual stored chemical kWh at evaluation boundaries, using faded
+capacity. Common `v0`/`vT` are daily-minimum tariff values at the first/last scored
+timestep, independent of whether the terminal objective is enabled. Different
+boundary values include inventory revaluation. Whole-home sums EV inventories;
+thermal storage is not valued. Missing archived boundary data gives unavailable
+adjusted savings, not a fabricated zero. Compare trip shortfalls alongside savings.
+Cycle starts and equivalent full cycles are distinct.

@@ -324,7 +324,10 @@ def summarize(output, manifest):
     complete = sum(s["state"] == "complete" for s in statuses)
     text = (f"# EV study status\n\nCompleted {complete}/{len(statuses)} jobs.\n\n"
             "Each job retains all-baseline, non-V2H twin, and advanced data/figures. "
-            "Net savings includes baseline NMC reference degradation at new minus residual battery value. No terminal-energy credit. "
+            "Net savings includes baseline NMC reference degradation at new minus residual battery value. "
+            "Unadjusted net savings excludes stored-energy credits. energy_adjusted_net_savings_usd adds the "
+            "separately reported boundary-inventory correction using common first/last-evaluation daily-minimum values "
+            "and actual faded-capacity chemical energy. Archived missing boundary data are unavailable, not zero. "
             "Warm-up and cooldown are controller-active and excluded from all evaluation metrics; study_initial_soc is the warm-up-start setting, "
             "whereas initial_soc in EV metrics is the realized evaluation-start SOC. "
             "All SOC/comfort violations, unmet trips, and solver fallbacks remain in the metrics.\n\n"
@@ -332,7 +335,11 @@ def summarize(output, manifest):
             "paired_summary.csv uses only cases completed by every staged configuration; it may be empty. "
             "Every summary groups by configuration, case and device: advanced and non-V2H are never averaged together. "
             "Statistics include mean/std/min/max and counts; max_solve_seconds_max is the worst observed solve. "
-            "figures/ contains separate advanced/non-V2H cross-controller trajectories and paired savings comparisons. "
+            "figures/ contains separate advanced/non-V2H cross-controller trajectories, paired raw/adjusted savings "
+            "and final-scenario forecast accuracy comparisons. Forecast scores include any persistence prefix; "
+            "zero-scenario selections are flagged/countable, not zero-error samples. Timestep scores include only "
+            "evaluation issuances/targets; horizon and next-trip metrics require complete evaluation-window horizons. "
+            "Run-level forecast_errors and forecast_errors_by_lead CSVs retain per-issuance values and counts. "
             "No cross-configuration baseline cache is used in this first driver.\n")
     (output/"study_report.md").write_text(text, encoding="utf-8")
 

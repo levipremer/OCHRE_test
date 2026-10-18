@@ -10,13 +10,15 @@ from examples.five_home_block.five_home_block.ev_schedule import build_ev_schedu
 from examples.five_home_block.five_home_block.output_mapping import standardize_results
 from examples.single_home_hems.hems import HEMSController
 from .simulation import SingleHomeHEMSSimulation
-from .controllers.ev import EVMPCController, EVScenarioController
+from .controllers.ev import EVMPCController, EVScenarioController, daily_terminal_energy_value
+from .forecast import Forecast
 from .ev_scenarios import ScenarioEVForecast, scenario_settings
 from .controllers.water_heater import (WaterHeaterPredictiveController,
     DEFAULT_MODEL_PATH, DEFAULT_RC_MODEL_PATH, DEFAULT_RC_OLD_MODEL_PATH, DEFAULT_RC_STRATIFIED_MODEL_PATH)
 from .control_forecasts import ExternalForecast
 from .backed_loads import backed_power
 from .ev_metrics import ev_metrics, ev_operating_state
+from .ev_forecast_metrics import score_forecasts
 from . import plotting
 
 CASES = ("all_baseline", "non_v2h_twin", "advanced")
@@ -261,6 +263,25 @@ def run_home(unified, home, mobility=None):
         price = data["commands"].electricity_price_usd_per_kwh
         ev_data = ev_metrics(data["raw"], selected_home, price, config.time_step.total_seconds()/3600,
                              devices, previous=previous, mobility=mobility)
+        # Common tariff-based inventory pricing is independent of OCP switches.
+        tariff = Forecast(pd.DataFrame(), tariff_price_at=controller.electricity_price_for_step)
+        v0 = daily_terminal_energy_value(tariff, data["raw"].index[0])
+        vT = daily_terminal_energy_value(tariff, data["raw"].index[-1])
+        ev_data["initial_energy_value_usd_per_kwh"] = v0
+        ev_data["final_energy_value_usd_per_kwh"] = vT
+        data["forecast_errors"] = {}
+        for ev in selected_home.evs:
+            name = f"EV_{ev.vehicle_id}"
+            provider = providers.get(name)
+            if isinstance(provider, ScenarioEVForecast):
+                issuance, leads, scores = score_forecasts(provider.issued_forecasts,
+                    mobility[ev.vehicle_id], ev.hems.consumption_kwh_per_km,
+                    provider.control_minutes, original_start, original_end)
+                issuance.to_csv(sim.data_directory/f"{name}_forecast_errors.csv", index=False)
+                leads.to_csv(sim.data_directory/f"{name}_forecast_errors_by_lead.csv", index=False)
+                data["forecast_errors"][name] = (issuance, leads)
+                for field, value in scores.items():
+                    ev_data.loc[ev_data.vehicle_id.eq(ev.vehicle_id), field] = value
         ev_data["case"] = case
         ev_data.to_csv(sim.data_directory/"ev_metrics.csv", index=False)
         for row in ev_data.to_dict("records"):
@@ -273,6 +294,9 @@ def run_home(unified, home, mobility=None):
                 peak_power_kw=float(power.max()), cost_usd=float((power*price).sum()*config.time_step.total_seconds()/3600))
             step_hours = config.time_step.total_seconds()/3600
             if name == "whole_home":
+                row.update(initial_energy_value_usd_per_kwh=v0, final_energy_value_usd_per_kwh=vT)
+                for metric in ("initial_stored_energy_kwh", "final_stored_energy_kwh"):
+                    row[metric] = float(ev_data[metric].sum()) if len(ev_data) else 0.0
                 for metric in ("estimated_degradation_cost_usd", "reference_degradation_cost_usd"):
                     row[metric] = float(ev_data[metric].sum(min_count=1)) if metric in ev_data else 0.0
             def starts(on):
@@ -313,14 +337,15 @@ def run_home(unified, home, mobility=None):
         ev_rows = comparison.loc[comparison.case.eq(case) & comparison.device.str.startswith("EV_")]
         ev_rows.to_csv(root/case/"data/ev_metrics.csv", index=False)
     from .unified_plots import plot_cases
-    plot_cases(cases, home, root, config.plot_dpi)
+    plot_cases(cases, home, root, config.plot_dpi, metrics=comparison)
     return UnifiedResult(cases, comparison, stats, directory)
 
 
 def baseline_economics(metrics):
     """Paired operating plus reference-aging savings versus all-baseline.
 
-    No terminal-energy credit. Missing aging for non-battery devices means zero;
+    Preserve unadjusted savings; add a separate boundary-inventory correction.
+    Missing aging for non-battery devices means zero;
     missing aging for EV/whole-home rows is an error, not free degradation.
     """
     result = metrics.copy()
@@ -338,6 +363,25 @@ def baseline_economics(metrics):
         float(baseline.loc[(r.home_id, r.device), "reference_degradation_cost_usd"])-r.reference_degradation_cost_usd
         for r in result.itertuples()]
     result["net_savings_usd"] = result.operating_cost_savings_usd + result.degradation_cost_savings_usd
+    fields = ("initial_stored_energy_kwh", "final_stored_energy_kwh",
+              "initial_energy_value_usd_per_kwh", "final_energy_value_usd_per_kwh")
+    corrections = []
+    for row in result.itertuples():
+        if row.device != "whole_home" and not row.device.startswith("EV_"):
+            corrections.append(0.0)
+            continue
+        base = baseline.loc[(row.home_id, row.device)]
+        # Archived result tables lack boundary inventories: do not invent a credit.
+        values = [getattr(row, f, np.nan) for f in fields] + [base.get(f, np.nan) for f in fields]
+        if not np.isfinite(values).all():
+            corrections.append(np.nan)
+            continue
+        e0, eT, v0, vT, b0, bT, bv0, bvT = values
+        if not np.allclose([v0, vT], [bv0, bvT], rtol=0, atol=1e-12):
+            raise ValueError("Inventory savings require common boundary valuations across cases")
+        corrections.append(vT*(eT-bT)-v0*(e0-b0))
+    result["energy_inventory_adjustment_usd"] = corrections
+    result["energy_adjusted_net_savings_usd"] = result.net_savings_usd + result.energy_inventory_adjustment_usd
     result = result.drop(columns=["savings_usd", "net_profit_usd"], errors="ignore")
     return result
 
@@ -426,10 +470,23 @@ def write_reports(config, results):
         "limits_reached can include non-time limits. Missing backend timings are unavailable, not zero.", "",
         "Operating-cost savings = all-baseline electricity cost minus case electricity cost. "
         "Degradation-cost savings = all-baseline NMC reference cost minus case NMC reference cost. Net savings is their sum; "
-        "all-baseline net savings is zero. No twin-relative savings or terminal-energy credit is used. "
+        "all-baseline net savings is zero. Unadjusted net savings excludes stored-energy credits. "
+        "energy_adjusted_net_savings_usd adds vT*(case end energy-baseline end energy) "
+        "minus v0*(case start energy-baseline start energy), using actual faded-capacity chemical kWh "
+        "and common daily-minimum tariff values at the first/last evaluation timesteps. "
+        "The correction is separate from realized electricity/aging costs and includes inventory "
+        "revaluation if boundary prices differ. No twin-relative savings are used. "
         "Degradation dollars are unweighted and use new minus residual battery value; all models include driving "
         "and residue half cycles. NMC reference aging uses additive fade and signed SOC stress, not early-life "
-        "nonlinear accumulation or measured true aging. The same battery calibration is used in all cases.", ""]
+        "nonlinear accumulation or measured true aging. The same battery calibration is used in all cases.", "",
+        "EV scenario errors score the final issued forecast, including any persistence prefix. "
+        "Availability is sampled at control-bin starts; arrival demand is distance-derived chemical kWh "
+        "integrated in each bin, not served energy. Timestep means are duration-weighted over scored "
+        "issuance/target pairs; overlapping forecasts intentionally retain distinct lead predictions. "
+        "Horizon/next-new-trip scores require a complete horizon inside evaluation. No-scenario "
+        "issuances are flagged and counted, not scored as zero error. Missing actual next trips have "
+        "NaN MAE; missed predicted trips use zero energy when an actual next trip exists. "
+        "Warmup/cooldown are excluded; forecast files retain sample counts.", ""]
     for (home_id, case), frame in metrics.groupby(["home_id", "case"], sort=False):
         lines += [f"## {home_id} / {case}", "", "| Device | Metric | Value |",
                   "| --- | --- | ---: |"]
