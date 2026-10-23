@@ -6,7 +6,11 @@ from .ev_degradation import BatteryDegradation, RainflowLedger
 
 
 class BidirectionalEV(Equipment):
-    """OCHRE EV plant with arrival impulses, safety caps and continuous SOH accounting."""
+    """OCHRE EV plant with departure impulses and continuous SOH accounting.
+
+    Initial SOC is the current measured state, already net of an ongoing trip.
+    Full trip demand is booked once on departure, not consumed gradually away.
+    """
     name = "EV"
     end_use = "EV"
     zone_name = None  # EV losses do not perturb the perfectly forecast thermal load
@@ -33,6 +37,8 @@ class BidirectionalEV(Equipment):
         self.in_event = False
         self.departure_shortfall = self.trip_energy = self.trip_unmet = 0.0
         self.departures = self.safety_override = 0
+        self.pre_departure_soc = self.soc
+        self.away_command_rejected = 0
         self.requested_kw = 0.0
         self._backed_load = 0.0
         self.actual_backed_load = None
@@ -43,7 +49,7 @@ class BidirectionalEV(Equipment):
         self._begin_throughput = 0.0
         self._begin_soh = self.options.initial_soh
         self._begin_energy = self.soc*self.capacity
-        self._arrival_fade_energy = self._power_fade_energy = 0.0
+        self._trip_fade_energy = self._power_fade_energy = 0.0
         super().__init__(**kwargs)
 
     @property
@@ -66,7 +72,7 @@ class BidirectionalEV(Equipment):
         return self.ev_config.capacity_kwh*self.soh
 
     def prepare_boundary(self, timestamp):
-        """Commit return impulses before exposing the current state to a controller."""
+        """Save pre-departure comfort state, then commit demand before control."""
         timestamp = pd.Timestamp(timestamp)
         if self._boundary == timestamp:
             return
@@ -74,23 +80,26 @@ class BidirectionalEV(Equipment):
         self._begin_throughput = self.ledger.throughput_kwh
         self._begin_soh = self.soh
         self._begin_energy = self.soc*self.capacity
-        self._arrival_fade_energy = self._power_fade_energy = 0.0
+        self._trip_fade_energy = self._power_fade_energy = 0.0
         self.departure_shortfall = self.trip_energy = self.trip_unmet = 0.0
         self.departures = 0
+        self.pre_departure_soc = self.soc
+        self.away_command_rejected = 0
         self.soc_saturation = 0
         self.soc_clipped_kwh = 0.0
         self.soc = self._saturate(self.soc)
-        for trip in self.trips.loc[self.trips.arrival.eq(timestamp)].itertuples():
+        self.pre_departure_soc = self.soc  # finite diagnostic; departure flag marks events
+        for trip in self.trips.loc[self.trips.departure.eq(timestamp)].itertuples():
+            self.pre_departure_soc = self.soc
+            self.departures += 1
+            self.departure_shortfall += max(trip.energy_kwh - self.soc*self.capacity, 0)
             old_capacity = self.capacity
             served = min(self.soc * self.capacity, trip.energy_kwh)
             self.soc = self._saturate(self.soc - trip.energy_kwh/self.capacity)
             self.ledger = self.ledger.preview(self.soc, old_capacity)
-            self._arrival_fade_energy += self.soc*(old_capacity-self.capacity)
+            self._trip_fade_energy += self.soc*(old_capacity-self.capacity)
             self.trip_energy += served
             self.trip_unmet += trip.energy_kwh - served
-        for trip in self.trips.loc[self.trips.departure.eq(timestamp)].itertuples():
-            self.departures += 1
-            self.departure_shortfall += max(trip.energy_kwh - self.soc*self.capacity, 0)
         self.next_soc = self.soc
         self.next_ledger = self.ledger
         self.in_event = bool(self.mobility.available([timestamp])[0])
@@ -136,6 +145,9 @@ class BidirectionalEV(Equipment):
         return self._mode_for_request()
 
     def calculate_power_and_heat(self):
+        # Physical interlock, independent of the controller/projector. Recheck
+        # the actual boundary even when a previously held command is reused.
+        self.prepare_boundary(self.current_time)
         o = self.options
         hours = self.time_res.total_seconds()/3600
         charge_limit = min(self.max_power, (1-self.soc)*self.capacity/(hours*o.charge_efficiency))
@@ -145,6 +157,7 @@ class BidirectionalEV(Equipment):
                               self.soc*self.capacity*o.discharge_efficiency/hours) if o.v2h else 0
         connected = self.in_event and self.current_schedule.get("Voltage (-)", 1) != 0
         power = float(np.clip(self.requested_kw, -discharge_limit, charge_limit)) if connected else 0.0
+        self.away_command_rejected = int(not self.in_event and abs(self.requested_kw) > 1e-7)
         self.safety_override = int(abs(power-self.requested_kw) > 1e-7)
         self.electric_kw = power
         dc = power*o.charge_efficiency if power >= 0 else power/o.discharge_efficiency
@@ -169,6 +182,8 @@ class BidirectionalEV(Equipment):
         price = self.battery.damage_price
         result.update({f"{self.results_name} {key}": value for key, value in {
             "SOC (-)": self.soc, "End SOC (-)": self.next_soc, "Parked": self.in_event,
+            "Pre-departure SOC (-)": self.pre_departure_soc,
+            "Away Command Rejected": self.away_command_rejected,
             "Start SOH (-)": self._begin_soh, "SOH (-)": self.soh, "End SOH (-)": end_soh,
             "Capacity (kWh)": self.capacity, "End Capacity (kWh)": end_capacity,
             "Start Stored Energy (kWh)": self._begin_energy,
@@ -183,7 +198,8 @@ class BidirectionalEV(Equipment):
             "Throughput Degradation Cost ($)": price*increments[2],
             "Cumulative Reference Degradation Cost ($)": price*self.next_ledger.totals[0],
             "Battery Throughput (kWh)": self.next_ledger.throughput_kwh-self._begin_throughput,
-            "Fade Energy Loss (kWh)": self._arrival_fade_energy+self._power_fade_energy,
+            "Fade Energy Loss (kWh)": self._trip_fade_energy+self._power_fade_energy,
+            "Trip Energy Timing": "departure",
             "Economic EOL Reached": int(end_soh <= self.options.end_of_life_soh),
             "Unmet Load (kWh)": self.departure_shortfall,
             "Departures": self.departures, "Trip Energy (kWh)": self.trip_energy,
@@ -202,7 +218,7 @@ class BidirectionalEV(Equipment):
 
     def battery_checkpoint(self):
         """Committed battery state; restore only at an unprocessed step boundary."""
-        return dict(soc=self.soc, initial_damage=self.initial_damage, ledger=self.ledger.snapshot(),
+        return dict(trip_energy_timing="departure", soc=self.soc, initial_damage=self.initial_damage, ledger=self.ledger.snapshot(),
                     nominal_capacity_kwh=self.ev_config.capacity_kwh,
                     calibration=self._checkpoint_calibration())
 
@@ -213,6 +229,8 @@ class BidirectionalEV(Equipment):
             "soc_stress_coefficient", "battery_replacement_cost_per_kwh", "battery_residual_value_per_kwh")}
 
     def restore_battery_checkpoint(self, state):
+        if state.get("trip_energy_timing") != "departure":
+            raise ValueError("EV checkpoint predates departure-energy accounting; start a new run")
         if state["nominal_capacity_kwh"] != self.ev_config.capacity_kwh or not np.isclose(
                 state["initial_damage"], self.initial_damage) or state.get("calibration") != self._checkpoint_calibration():
             raise ValueError("EV checkpoint battery initialization does not match configuration")
@@ -233,5 +251,7 @@ class BidirectionalEV(Equipment):
         self._begin_throughput = 0.0
         self._begin_soh = self.soh
         self._begin_energy = self.soc*self.capacity
-        self._arrival_fade_energy = self._power_fade_energy = 0.0
+        self._trip_fade_energy = self._power_fade_energy = 0.0
+        self.pre_departure_soc = self.soc
+        self.away_command_rejected = 0
         self._boundary = None

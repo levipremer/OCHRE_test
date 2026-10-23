@@ -70,7 +70,9 @@ def ev_metrics(raw, home, prices, step_hours, controllers=(), *, previous=None, 
                 departures = pd.DatetimeIndex(mobility[ev.vehicle_id].trips.departure.unique())
                 departures = departures[(departures >= raw.index[0]) &
                                         (departures < raw.index[-1]+pd.Timedelta(hours=step_hours))]
-                departure_soc = soc.reindex(departures)
+                # New outputs explicitly retain the state BEFORE departure
+                # depletion. Old arrival-accounted outputs keep their meaning.
+                departure_soc = raw.get(f"{name} Pre-departure SOC (-)", soc).reindex(departures)
                 if departure_soc.isna().any():
                     raise ValueError(f"{name}: departure timestamps must align with saved plant states")
                 shortfall = (ev.hems.comfort_soc_min-departure_soc).clip(lower=0)
@@ -79,6 +81,7 @@ def ev_metrics(raw, home, prices, step_hours, controllers=(), *, previous=None, 
                            mean_departure_comfort_shortfall=float(shortfall.mean()) if len(shortfall) else 0.,
                            max_departure_comfort_shortfall=float(shortfall.max()) if len(shortfall) else 0.)
             row.update(health_low_soc_hours=(ev.hems.health_soc_min-end_soc).clip(lower=0).sum()*step_hours,
+                       away_command_rejected_steps=int(raw.get(f"{name} Away Command Rejected", pd.Series(dtype=float)).sum()),
                        health_high_soc_hours=(end_soc-ev.hems.health_soc_max).clip(lower=0).sum()*step_hours,
                        comfort_soc_shortfall_hours=(ev.hems.comfort_soc_min-end_soc).clip(lower=0).sum()*step_hours,
                        max_comfort_soc_shortfall=float((ev.hems.comfort_soc_min-end_soc).clip(lower=0).max()),
@@ -88,7 +91,7 @@ def ev_metrics(raw, home, prices, step_hours, controllers=(), *, previous=None, 
                        safety_overrides=int(raw[f"{name} Safety Override"].sum()),
                        projection_overrides=sum(a["projection_override"] for a in controller.action_history
                                                 if raw.index[0] <= a["timestamp"] <= raw.index[-1]) if controller else 0)
-            # Include pre/post plant-step states: charging and return impulses
+            # Include pre/post plant-step states: charging and trip impulses
             # must not cancel and hide an extremum. Unserved driving is excluded.
             path = np.r_[initial_soc, np.column_stack([soc, end_soc]).ravel()]
             battery = BatteryDegradation(ev.capacity_kwh, ev.hems)

@@ -12,9 +12,10 @@ native/pass-through. Upstream attribution and native usage are retained below.
 
 - Standalone home physics/mobility and control preferences, independently
   configurable per home/EV: solver, formulation, horizon, forecast and weights.
-- One runner saves all-baseline, non-V2H twin and advanced trajectories.
-  Twin end-use demand supplies backed-load forecasts; actual-load caps protect execution.
-- EV convex/MILP and historical-scenario MPC, fixed solve clocks, departure
+- One runner saves all-baseline and advanced trajectories plus an optional non-V2H
+  twin. Supplied configs set `run_non_v2h_twin: false` and use baseline backed loads;
+  omission retains legacy three-case behavior. Actual-load caps protect execution.
+- EV convex/MILP and historical-scenario MPC, fixed solve clocks, all-time soft SOC
   comfort, optional health/degradation/terminal costs, and baseline fallback.
 - Continuous SOH/damage accounting, faded-capacity SOC, baseline-relative net
   savings, unscored warmup/cooldown and consolidated performance/solver reports.
@@ -42,7 +43,7 @@ Installing gurobipy alone does not remove license size limits.
 | Guide | Purpose |
 | --- | --- |
 | [HEMS quick start](examples/single_home_hems/README.md) | Templates, dependencies and commands |
-| [Pipeline](examples/single_home_hems/docs/pipeline.md) | Three-case flow, constraints and outputs |
+| [Pipeline](examples/single_home_hems/docs/pipeline.md) | Optional-twin flow, constraints and outputs |
 | [Extension map](examples/single_home_hems/docs/extending.md) | Module responsibilities and safe changes |
 | [Battery model](examples/single_home_hems/docs/degradation.md) | SOH, calibration and damage pricing |
 | [Scenarios](examples/single_home_hems/docs/scenarios.md) | Historical selection and joint scenario OCP |
@@ -50,6 +51,7 @@ Installing gurobipy alone does not remove license size limits.
 | [Five-home example](examples/five_home_block/README.md) | Shared factory, inputs and neighborhood experiments |
 | [Validation](examples/single_home_hems/docs/validation/README.md) | Commands and known failures |
 | [Change history](CUSTOM_CHANGES.md) / [archive](archive/development_docs_2026-10-17/README.md) | Research changes and superseded guides |
+| [Push README](PUSH_README.md) | Changes since the last pushed revision and release caveats |
 
 Native physics live in `ochre/`; shared EV equipment, mobility and aging models
 live in `examples/five_home_block/five_home_block/`. Controllers, forecasts,

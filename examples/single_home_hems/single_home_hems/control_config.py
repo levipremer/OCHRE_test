@@ -23,7 +23,7 @@ PHYSICAL = {"consumption_kwh_per_km", "charge_efficiency", "discharge_efficiency
             "rainflow_exponent", "reference_cycle_count", "soc_stress_coefficient"}
 MOBILITY = {"source", "source_file", "source_vehicle", "seed", "history_days"}
 EV_CONTROL = {f.name for f in fields(EVOptions)} - PHYSICAL - MOBILITY - {
-    "forecast_margin_hours", "health_min_soc", "health_max_soc", "health_low_weight", "health_high_weight", "trip_weight",
+    "forecast_margin_hours", "health_min_soc", "health_max_soc", "health_low_weight", "health_high_weight",
     "target_soc_min", "target_soc_max", "target_soc_low_weight", "target_soc_high_weight"}
 COMMON = {"controller", "formulation", "solver", "solver_options", "horizon_hours",
           "forecast_hours", "control_minutes", "forecast"}
@@ -112,8 +112,26 @@ class UnifiedConfiguration:
     warmup_hours: float = 24.0
     cooldown_hours: float = 24.0
 
+    @property
+    def run_non_v2h_twin(self):
+        """Optional comparison case; omission preserves the three-case pipeline."""
+        value = self.control_document.get("run_non_v2h_twin", True)
+        if type(value) is not bool:
+            raise ValueError("run_non_v2h_twin must be boolean")
+        return value
+
+    @property
+    def case_names(self):
+        return (("all_baseline", "non_v2h_twin", "advanced") if self.run_non_v2h_twin
+                else ("all_baseline", "advanced"))
+
+    @property
+    def backed_load_reference_case(self):
+        return "non_v2h_twin" if self.run_non_v2h_twin else "all_baseline"
+
     def simulation_window(self):
         """Controller-active pre/post-roll; public start/duration describe evaluation."""
+        self.run_non_v2h_twin  # validate before running or creating outputs
         intervals = [self.neighborhood.time_step.total_seconds()]
         for home in self.controls.values():
             intervals += [c["control_minutes"] * 60 for c in [home["hpwh"], *home["evs"].values()]
@@ -143,7 +161,7 @@ def load_unified(home_file, control_file, repo_root):
     control_doc = json.loads(Path(control_file).read_text(encoding="utf-8"))
     keys(homes_doc, {"simulation", "homes", "_comments"}, "home document")
     required(homes_doc, {"simulation", "homes"}, "home document")
-    keys(control_doc, {"defaults", "homes", "_comments"}, "control document")
+    keys(control_doc, {"defaults", "homes", "_comments", "run_non_v2h_twin"}, "control document")
     keys(control_doc.get("defaults", {}), {"ev", "hpwh", "hvac"}, "control defaults")
     simulation = homes_doc["simulation"]
     sim_fields = {"start_time", "duration_hours", "time_step_minutes", "initialization_hours",

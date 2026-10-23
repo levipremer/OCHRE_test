@@ -136,10 +136,16 @@ class EVHorizon:
         dt = np.diff(t.asi8)/3.6e12
         z = mobility.available(t[:-1]).astype(int)
         means, minima, prices, dc_cost, backed_cost = [], [], [], [], []
-        for a, b in zip(t[:-1], t[1:]):
-            selected = (data.index >= a) & (data.index < b)
-            pi = data.loc[selected, "electricity_price_usd_per_kwh"].to_numpy()
-            L = load.loc[selected].to_numpy()
+        # Sorted forecast rows: slice the identical half-open blocks directly.
+        # Preserve per-block reductions and exact mobility boundaries; no rebinning.
+        if not data.index.is_monotonic_increasing:
+            raise ValueError("EV forecast timestamps must be sorted")
+        offsets = data.index.searchsorted(t, side="left")
+        price_values = data["electricity_price_usd_per_kwh"].to_numpy()
+        load_values = load.to_numpy()
+        for left, right in zip(offsets[:-1], offsets[1:]):
+            pi = price_values[left:right]
+            L = load_values[left:right]
             cap = np.minimum(L, o.max_discharge_kw) if o.v2h else np.zeros(len(L))
             if not np.isfinite(pi).all():
                 raise ValueError("EV electricity prices must be finite")
@@ -151,8 +157,10 @@ class EVHorizon:
                 raise ValueError("Negative prices with bidirectional convex EV power are nonconvex; explicitly select MILP")
         trip_kwh = np.zeros(len(t)-1)
         for trip in trips.itertuples():
-            if trip.arrival <= end:
-                trip_kwh[t.get_loc(trip.arrival)-1] += trip.energy_kwh
+            # x[0] is measured AFTER this boundary's plant events. Never debit
+            # an ongoing/current-boundary trip again; horizon end is exclusive.
+            if timestamp < trip.departure < end:
+                trip_kwh[t.get_loc(trip.departure)-1] += trip.energy_kwh
         group = ((t[:-1]-timestamp)/pd.Timedelta(minutes=o.control_minutes)).astype(int).to_numpy()
         budget_dt = np.array([max(0, (min(b, budget_end)-a).total_seconds()/3600)
                               for a, b in zip(t[:-1], t[1:])])
@@ -211,14 +219,17 @@ def _milp_transitions(c, h, b_c, b_d, constraints):
 def build_ev_problem(c, timestamp, initial_soc, forecast):
     """EV OCP, in the same data -> variables -> constraints -> cost order as HPWH.
 
-    x = battery SOC; p = signed chemical kW; P = signed AC kW; z = availability.
+    x = post-boundary battery SOC; x_pre = SOC before a departure impulse.
+    p = signed chemical kW; P = signed AC kW; z = availability.
     u_c/u_d = nonnegative AC power; b_c/b_d = exclusive MILP operating modes.
     N counts control intervals, while j indexes mobility-split integration blocks.
 
-    min J_electricity + J_persistence + J_terminal + w_comfort*H_comfort
+    min J_electricity + J_persistence + J_terminal + J_trip
+        + w_comfort*H_comfort
         + w_health * (w_health_SOC*(H_low + H_high) + C_degradation/N).
 
-    Health terms integrate using dt/N; comfort averages only departure shortfalls.
+    Health terms integrate using dt/N; comfort averages pre-departure shortfalls.
+    Trip cost averages unmet_kWh/E over new departures, not control intervals.
     C_degradation is already
     cumulative dollars: do not multiply it by dt again. With rainflow enabled,
     this builds a MASTER problem; _solve_rainflow supplies its supporting cuts
@@ -277,8 +288,42 @@ def build_ev_problem(c, timestamp, initial_soc, forecast):
         J_pers = cp.sum(cp.multiply(h.dt, sum(mode_changes))) / h.N
         discharge_chemical = u_d/o.discharge_efficiency
 
-    # (2) SOC dynamics, full arrival-distance demand; NO unserved-energy slack.
-    constraints.append(x[1:] == x[:-1] + (cp.multiply(h.dt, p)-h.trip_kwh)/E)
+    # (2) SOC dynamics. Trip demand stays distance-derived, but infeasible
+    #     forecast paths receive a bounded, explicitly penalized unmet-energy
+    #     slack. The simulated plant still attempts the complete realized trip,
+    #     clips physical SOC at zero, and reports its actual unmet energy.
+    trip_blocks = np.flatnonzero(h.trip_kwh > 0)
+    if len(trip_blocks):
+        trip_shortfall = cp.Variable(len(trip_blocks), nonneg=True, name="trip_shortfall_kwh")
+        selector = np.zeros((n, len(trip_blocks)))
+        selector[trip_blocks, np.arange(len(trip_blocks))] = 1
+        constraints.append(trip_shortfall <= h.trip_kwh[trip_blocks])
+        shortfall_by_block = selector @ trip_shortfall
+        served_trip_kwh = h.trip_kwh-shortfall_by_block
+        trip_shortfall_total = cp.sum(trip_shortfall)
+    else:
+        trip_shortfall = None
+        shortfall_by_block = cp.Constant(np.zeros(n))
+        served_trip_kwh = h.trip_kwh
+        trip_shortfall_total = cp.Constant(0)
+    constraints.append(x[1:] == x[:-1] + (cp.multiply(h.dt, p)-served_trip_kwh)/E)
+    # At a departure, x is POST-debit; x_pre restores the served debit only.
+    # Bounding both prevents charging above capacity immediately before a trip.
+    x_pre = cp.hstack([x[0], x[1:]+served_trip_kwh/E])
+    constraints += [x_pre >= 0, x_pre <= 1]
+    # Include both sides of each impulse in rainflow: otherwise charging just
+    # before departure can disappear when netted with the driving debit.
+    event_states = [x[0]]
+    for j in range(1, n+1):
+        if h.trip_kwh[j-1] > 0:
+            event_states.append(x_pre[j])
+        event_states.append(x[j])
+    rainflow_state = cp.hstack(event_states)
+
+    # Average over new trips in this horizon (including zero-demand trips),
+    # retaining capacity normalization. Already-debited trips are excluded.
+    trip_count = int(np.count_nonzero(h.departure_indices > 0))
+    J_trip = o.trip_weight * trip_shortfall_total / (E*max(1, trip_count))
 
     # (3) Cumulative V2H battery discharge (not driving or SOC excursion).
     D_past = c.discharge_history(h.t[0]-pd.Timedelta(hours=h.history_hours), h.t[0], normalized=True)
@@ -290,8 +335,13 @@ def build_ev_problem(c, timestamp, initial_soc, forecast):
     health_low = cp.sum(cp.multiply(h.dt, cp.pos(o.health_soc_min-x[:-1]))) / h.N
     health_high = cp.sum(cp.multiply(h.dt, cp.pos(x[:-1]-o.health_soc_max))) / h.N
     departures = h.departure_indices
-    comfort = (cp.sum(cp.pos(o.comfort_soc_min-x[departures])) / len(departures)
-               if len(departures) else cp.Constant(0))
+    comfort_soc = x_pre
+    if 0 in departures and np.isfinite(getattr(c, "current_departure_soc", np.nan)):
+        comfort_soc = cp.hstack([c.current_departure_soc, x_pre[1:]])
+    #comfort = (cp.sum(cp.pos(o.comfort_soc_min-comfort_soc[departures])) / len(departures)
+    #           if len(departures) else cp.Constant(0))
+
+    comfort = cp.sum(cp.multiply(h.dt, cp.pos(o.comfort_soc_min-x[:-1]))) / h.N
 
     # (5) Optional monetary degradation, with the same physical calibration used
     #     for realized-trajectory metrics. Health and comfort weights are separate.
@@ -313,6 +363,7 @@ def build_ev_problem(c, timestamp, initial_soc, forecast):
     v = daily_terminal_energy_value(forecast, timestamp) if o.enforce_terminal_soc else 0.0
     J_terminal = v * E * (initial_soc-x[-1]) / h.N
     J = dict(electricity=o.electricity_weight*energy_cost,
+             trip_shortfall=J_trip,
              health_soc=o.health_weight*o.health_soc_weight*(health_low+health_high),
              degradation=o.health_weight*degradation,
              comfort=o.comfort_weight*comfort,
@@ -321,12 +372,15 @@ def build_ev_problem(c, timestamp, initial_soc, forecast):
     if not problem.is_dcp():
         raise ValueError("EV formulation is not DCP; check bidirectional negative-price inputs")
     first_active = np.flatnonzero((h.group == 0) & (h.z == 1))
-    return problem, dict(state=x, chemical=p, ac=P, charge=u_c, discharge=u_d, fraction=fraction,
+    return problem, dict(state=x, pre_departure_state=comfort_soc, rainflow_state=rainflow_state,
+        chemical=p, ac=P, charge=u_c, discharge=u_d, fraction=fraction,
         charge_mode=b_c if o.formulation == "milp" else None,
         discharge_mode=b_d if o.formulation == "milp" else None,
         boundaries=h.t, command_index=int(first_active[0]) if len(first_active) else 0,
         N=h.N, horizon=h, starts=mode_starts, ends=mode_ends, discharge_past=D_past,
         measured_soh=c.current_soh, capacity_kwh=E,
+        trip_shortfall_variable=trip_shortfall, trip_shortfall_by_block=shortfall_by_block,
+        trip_departure_blocks=trip_blocks, trip_count=trip_count,
         terminal_value_usd_per_kwh=v,
         initial_soc=initial_soc, rainflow_theta=theta, battery=battery, health_low=health_low, health_high=health_high,
         discharge_future=D_future, objective_terms=J, **J)
@@ -464,7 +518,7 @@ class EVMPCController:
             from .ev_scenario import solve_rainflow
             return solve_rainflow(self, problem, plan, options, deadline)
         o = self.options
-        x, theta, battery = plan["state"], plan["rainflow_theta"], plan["battery"]
+        x, theta, battery = plan["rainflow_state"], plan["rainflow_theta"], plan["battery"]
         initial_soc = float(plan["initial_soc"])
         history = list(self.soc_history)
         if not history or abs(history[-1]-initial_soc) > 1e-10:
@@ -577,6 +631,10 @@ class EVMPCController:
             prediction = forecast.for_device(self.equipment_name, timestamp, self.horizon)
             problem, plan = self.build_problem(timestamp, soc, prediction)
             options = deepcopy(self.options.solver_options)
+            if self.options.solver == "GUROBI":
+                # Classify infeasible versus unbounded in one backend call;
+                # an automatic retry could consume a second native time budget.
+                options.setdefault("DualReductions", 0)
             if self.options.formulation == "milp":
                 if self.options.solver == "SCIPY":
                     options.setdefault("scipy_options", {})["mip_rel_gap"] = self.options.mip_relative_gap
@@ -600,17 +658,29 @@ class EVMPCController:
             solve_seconds = diagnostic.get("solve_call_seconds", solve_seconds)
             status_text = diagnostic.get("outer_status", str(problem.status))
             if successful:
+                path_plans = plan.get("scenario_plans", [plan])
+                predicted_shortfalls = [float(np.sum(p["trip_shortfall_by_block"].value)) for p in path_plans]
+                diagnostic.update(predicted_trip_shortfall_kwh_mean=float(np.mean(predicted_shortfalls)),
+                    predicted_trip_shortfall_kwh_max=float(np.max(predicted_shortfalls)),
+                    predicted_scenarios_with_trip_shortfall=sum(v > 1e-7 for v in predicted_shortfalls))
                 j = plan["command_index"]
                 self.target = float(plan["ac"].value[j])
                 self.held_mode = 1 if self.target > 1e-6 else -1 if self.target < -1e-6 else 0
                 self.plans.append(dict(timestamp=timestamp, boundaries=plan["boundaries"].astype(str).tolist(),
-                    soc=plan["state"].value.tolist(), chemical_kw=plan["chemical"].value.tolist(),
+                    soc=plan["state"].value.tolist(), rainflow_soc=plan["rainflow_state"].value.tolist(),
+                    chemical_kw=plan["chemical"].value.tolist(),
                     charge_kw=plan["charge"].value.tolist(), discharge_kw=plan["discharge"].value.tolist(),
                     objective=float(diagnostic.get("exact_objective", problem.value)),
                     objective_terms={k: float(v.value) for k, v in plan["objective_terms"].items()},
                     degradation_method=self.options.degradation_method,
                     measured_soh=plan["measured_soh"], capacity_kwh=plan["capacity_kwh"],
                     terminal_value_usd_per_kwh=plan["terminal_value_usd_per_kwh"],
+                    predicted_trip_shortfall_kwh=predicted_shortfalls[0],
+                    trip_energy_timing="departure", trip_count=plan["trip_count"],
+                    trip_departure_blocks=plan["trip_departure_blocks"].tolist(),
+                    pre_departure_soc=plan["pre_departure_state"].value.tolist(),
+                    trip_energy_kwh=plan["horizon"].trip_kwh.tolist(),
+                    trip_shortfall_kwh=plan["trip_shortfall_by_block"].value.tolist(),
                     initial_energy_kwh=plan["capacity_kwh"]*soc,
                     terminal_energy_kwh=plan["capacity_kwh"]*float(plan["state"].value[-1]),
                     normalization_steps=plan["N"], cycle_history_hours=plan["horizon"].history_hours,
@@ -621,10 +691,15 @@ class EVMPCController:
                     self.plans[-1].update(scenario_metadata=plan["scenario_metadata"],
                         representative_scenario_id=plan["scenario_ids"][0],
                         scenarios=[dict(candidate_id=identifier, boundaries=p["boundaries"].astype(str).tolist(),
-                            soc=p["state"].value.tolist(), chemical_kw=p["chemical"].value.tolist(),
+                            soc=p["state"].value.tolist(), rainflow_soc=p["rainflow_state"].value.tolist(),
+                            chemical_kw=p["chemical"].value.tolist(),
                             charge_kw=p["charge"].value.tolist(), discharge_kw=p["discharge"].value.tolist(),
                             available=p["horizon"].z.tolist(), trip_energy_kwh=p["horizon"].trip_kwh.tolist(),
+                            predicted_trip_shortfall_kwh=float(np.sum(p["trip_shortfall_by_block"].value)),
+                            trip_shortfall_kwh=p["trip_shortfall_by_block"].value.tolist(),
                             departure_indices=p["horizon"].departure_indices.tolist(),
+                            pre_departure_soc=p["pre_departure_state"].value.tolist(),
+                            trip_count=p["trip_count"], trip_energy_timing="departure",
                             objective_terms={k: float(v.value) for k, v in p["objective_terms"].items()},
                             terminal_energy_kwh=p["capacity_kwh"]*float(p["state"].value[-1]))
                             for identifier, p in zip(plan["scenario_ids"], plan["scenario_plans"])])
@@ -644,6 +719,7 @@ class EVMPCController:
         timestamp = pd.Timestamp(timestamp)
         status = previous_status or {}
         soc = float(np.clip(status[f"{self.equipment_name} SOC (-)"], 0, 1))
+        self.current_departure_soc = float(status.get(f"{self.equipment_name} Pre-departure SOC (-)", np.nan))
         mobility = forecast.ev_schedules[self.ev.vehicle_id]
         available = bool(mobility.available([timestamp])[0])
         backed = float(forecast.backed_load_kw.at[timestamp])
@@ -663,7 +739,10 @@ class EVMPCController:
             raise ValueError("EV measured SOH and capacity are inconsistent")
         # Previous end-SOC precedes this boundary's trip impulse. Preserve both
         # extrema so driving cannot cancel an immediately preceding charge.
-        self.soc_history.extend([float(status.get(f"{self.equipment_name} End SOC (-)", soc)), soc])
+        self.soc_history.extend([float(status.get(f"{self.equipment_name} End SOC (-)", soc))])
+        if np.isfinite(self.current_departure_soc):
+            self.soc_history.append(self.current_departure_soc)
+        self.soc_history.append(soc)
         self.soc_history = np.asarray(self.soc_history)[turning_points(self.soc_history)].tolist()
         if self.next_solve is None or timestamp >= self.next_solve:
             self._solve(timestamp, soc, forecast)

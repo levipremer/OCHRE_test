@@ -3,12 +3,20 @@ import unittest
 import numpy as np
 import pandas as pd
 from test.test_ev_v2h import schedule
-from examples.single_home_hems.single_home_hems.ev_forecast_metrics import score_forecasts
+from examples.single_home_hems.single_home_hems.ev_forecast_metrics import score_forecasts, _energy_bins, _energy
 from examples.single_home_hems.single_home_hems.ev_scenarios import persistent_prefix
 from examples.single_home_hems.single_home_hems.unified import baseline_economics
 
 
 class EVReportingTests(unittest.TestCase):
+    def test_batched_energy_matches_half_open_reference(self):
+        path = schedule([(-10, 0, 2), (1, 7, 3), (8, 15, 4),
+                         (16, 29, 0), (30, 37, 5), (38, 45, 6)])
+        edges = path.start + pd.to_timedelta([0, 15, 30, 37, 45], unit="min")
+        expected = [_energy(path, a, b, .2) for a, b in zip(edges[:-1], edges[1:])]
+        np.testing.assert_allclose(_energy_bins(path, edges, .2), expected, rtol=1e-14)
+        np.testing.assert_array_equal(_energy_bins(schedule(), edges, .2), 0)
+
     def score(self, actual, paths, minutes=60, end_minutes=None):
         t = actual.start
         return score_forecasts([(t, pd.Timedelta(minutes=minutes), paths)],
@@ -47,6 +55,11 @@ class EVReportingTests(unittest.TestCase):
         _, _, exact = self.score(actual, (actual,), minutes=90)
         _, _, prefixed = self.score(actual, (modified,), minutes=90)
         self.assertEqual(exact["forecast_brier_home"], 0)
+        self.assertEqual(prefixed["forecast_brier_home"], 0)  # matching state: no override
+        mismatched = schedule([(-5, 30, 10), (60, 75, 5)])
+        modified = persistent_prefix(mismatched, actual.start, pd.Timedelta(minutes=90),
+            pd.Timedelta(minutes=45), True, pd.Timedelta(minutes=1))
+        _, _, prefixed = self.score(actual, (modified,), minutes=90)
         self.assertGreater(prefixed["forecast_brier_home"], 0)
         rows, leads, scores = self.score(actual, ())
         self.assertTrue(rows.no_scenarios_selected.all())

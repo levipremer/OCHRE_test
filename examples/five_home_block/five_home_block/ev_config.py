@@ -49,7 +49,7 @@ class EVOptions:
     enforce_cycle_limit: bool | None = None
     enforce_dwell_constraints: bool | None = None
     electricity_weight: float = 1
-    trip_weight: float = 100
+    trip_weight: float = 10000  # Per-path mean unmet capacity fraction per new trip; scenario max.
     health_low_weight: float = 1
     health_high_weight: float = 1
     target_soc_low_weight: float | None = None

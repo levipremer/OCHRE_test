@@ -178,6 +178,7 @@ class SingleHomeHEMSSimulation:
         *,
         apply_controls: bool,
         raw_directory: Path,
+        progress=None,
     ) -> tuple[
         pd.DataFrame,
         pd.DataFrame,
@@ -283,8 +284,11 @@ class SingleHomeHEMSSimulation:
         sensor_records: list[dict[str, Any]] = []
         training_records: list[dict[str, Any]] = []
         hvac_training_records: list[dict[str, Any]] = []
+        total_steps = len(self._expected_index())
+        if progress:
+            progress(phase="simulating", completed=0, total=total_steps, timestamp=self.config.start_time)
         try:
-            for timestamp in dwelling.sim_times:
+            for step, timestamp in enumerate(dwelling.sim_times, 1):
                 if timestamp >= self.config.start_time + self.config.duration:
                     break
                 if dwelling.current_time != timestamp:
@@ -317,6 +321,7 @@ class SingleHomeHEMSSimulation:
                             equipment = dwelling.equipment[f"EV_{ev.vehicle_id}"]
                             equipment.prepare_boundary(timestamp)
                             previous_status[f"EV_{ev.vehicle_id} SOC (-)"] = equipment.soc
+                            previous_status[f"EV_{ev.vehicle_id} Pre-departure SOC (-)"] = equipment.pre_departure_soc
                             previous_status[f"EV_{ev.vehicle_id} SOH (-)"] = equipment.soh
                             previous_status[f"EV_{ev.vehicle_id} Capacity (kWh)"] = equipment.capacity
                             previous_status[f"EV_{ev.vehicle_id} Parked"] = equipment.in_event
@@ -383,6 +388,9 @@ class SingleHomeHEMSSimulation:
                         "control_signal_json": json.dumps(controls, sort_keys=True),
                     }
                 )
+                if progress:
+                    progress(phase="simulating", completed=step, total=total_steps,
+                             timestamp=pd.Timestamp(timestamp)+self.config.time_step)
         except Exception:
             dwelling.finalize(failed=True)
             raise

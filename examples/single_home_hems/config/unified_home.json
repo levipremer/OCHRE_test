@@ -54,7 +54,7 @@
       "evs": {
         "01A": {
           "vehicle_type": "SUV",
-          "capacity_kwh": 60,
+          "capacity_kwh": 240,
           "charger_power_kw": 11.5,
           "nom_commute_arrival_time": "15:20",
           "nom_commute_departure_time": "08:30",
@@ -64,13 +64,13 @@
           "max_commute_times_var_hr": 0.5,
           "max_roundtrip_miles": 150,
           "physical": {
-            "initial_soh": 0.85,
-            "consumption_kwh_per_km": 0.25,
+            "initial_soh": 0.90,
+            "consumption_kwh_per_km": 0.298,
             "charge_efficiency": 0.9,
             "discharge_efficiency": 0.9,
             "max_discharge_kw": 9.6,
             "v2h": true,
-            "battery_replacement_cost_per_kwh": 119,
+            "battery_replacement_cost_per_kwh": 142,
             "battery_residual_value_per_kwh": 0,
             "calibration_end_of_life_soh": 0.8,
             "end_of_life_soh": 0.7,
@@ -84,8 +84,8 @@
             "source_vehicle": null,
             "source": "audi",
             "source_file": "examples/five_home_block/inputs/ev/audi_forecasting_15min_20vehicle.parquet",
-            "seed": 43,
-            "history_days": 30
+            "seed": 42,
+            "history_days": 21
           },
           "nom_commute_miles": null
         }

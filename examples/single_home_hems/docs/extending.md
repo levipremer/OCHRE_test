@@ -8,7 +8,7 @@ Paths below are relative to examples/single_home_hems unless otherwise stated.
 | --- | --- |
 | Unified CLI / study CLI | run_simulation.py / run_ev_study.py |
 | Strict loading, precedence, phase windows | single_home_hems/control_config.py |
-| Three-case orchestration and reports | single_home_hems/unified.py |
+| Optional-twin orchestration and reports | single_home_hems/unified.py |
 | Native dwelling timestep loop | single_home_hems/simulation.py |
 | Forecast routing / external snapshots | single_home_hems/forecast.py / control_forecasts.py |
 | Historical EV scenario selection | single_home_hems/ev_scenarios.py |
@@ -20,6 +20,7 @@ Paths below are relative to examples/single_home_hems unless otherwise stated.
 | Realized EV metrics | single_home_hems/ev_metrics.py |
 | Unified / study plots | single_home_hems/unified_plots.py / ev_study_plots.py |
 | Frozen paired studies and checkpoints | single_home_hems/ev_study.py |
+| Study-local all-baseline trajectory reuse | single_home_hems/baseline_cache.py |
 | Legacy caller adaptation | single_home_hems/legacy_adapter.py |
 
 Shared physical EV code remains in examples/five_home_block/five_home_block:

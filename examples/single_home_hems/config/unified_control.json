@@ -1,4 +1,5 @@
 {
+  "run_non_v2h_twin": false,
   "defaults": {
     "ev": {
       "controller": "baseline",
@@ -11,9 +12,9 @@
       "forecast": {
         "mode": "perfect",
         "file": null,
-        "scenario_method": "knn_state",
+        "scenario_method": "tod_dow_state_hier",
         "scenario_count": 5,
-        "lookback_days": 30,
+        "lookback_days": 21,
         "knn_history_hours": 24,
         "scenario_minutes": 15,
         "prefix_control_intervals": 4
@@ -21,6 +22,7 @@
       "enforce_cycle_limit": false,
       "enforce_dwell_constraints": false,
       "electricity_weight": 1,
+      "trip_weight": 10000,
       "persistence_weight": 0,
       "dwell_on_minutes": 30,
       "dwell_off_minutes": 30,
@@ -126,16 +128,17 @@
         "01A": {
           "controller": "mpc",
           "formulation": "milp",
-          "solver": "SCIPY",
+          "solver": "GUROBI",
           "horizon_hours": 12,
           "forecast_hours": 12,
           "control_minutes": 15,
           "forecast": {
-            "mode": "scenario"
+            "mode": "perfect"
           },
           "dwell_on_minutes": 60,
           "dwell_off_minutes": 60,
           "electricity_weight": 1,
+          "trip_weight": 10000,
           "persistence_weight": 0,
           "projection": "nearest",
           "enforce_dwell_constraints": false,
@@ -144,7 +147,7 @@
           "health_soc_min": 0.2,
           "health_soc_max": 0.8,
           "comfort_soc_min": 0.4,
-          "enforce_terminal_soc": false,
+          "enforce_terminal_soc": true,
           "enforce_discharge_budget": false,
           "discharge_budget_soc": 1,
           "mip_relative_gap": 0.05,

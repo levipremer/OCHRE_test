@@ -5,7 +5,7 @@
 ## Execution and comparison
 
 `run_simulation.py` loads standalone home/control JSON, validates settings, freezes
-mobility, and runs three cases with fresh controller and plant state:
+mobility, and runs the selected cases with fresh controller and plant state:
 
 | Case | Behavior |
 | --- | --- |
@@ -13,10 +13,19 @@ mobility, and runs three cases with fresh controller and plant state:
 | non_v2h_twin | Configured controllers, but V2H disabled |
 | advanced | Configured controllers, including V2H if selected |
 
-The twin's realized selected end uses supply advanced backed-load forecasts.
-It extends beyond cooldown to cover final horizons. The all-baseline case is
-the savings reference, **not** the backed-load provider. All cases share weather,
+Supplied control/study documents set top-level `run_non_v2h_twin` to `false`;
+omitting the key preserves the legacy `true` default.
+Set it to `false` to run only all-baseline and advanced; twin outputs are omitted.
+The twin supplies advanced backed-load forecasts when enabled; otherwise the
+all-baseline realized selected end uses supply them. The selected reference
+extends beyond cooldown to cover final horizons; this tail is not scored.
+The all-baseline case always remains the savings reference. All cases share weather,
 mobility, physical configuration and configured initial states.
+
+Studies may reuse an integrity-checked all-baseline trajectory with identical
+plant inputs and comfort target; metrics/plots are regenerated per job. The
+optional `baseline_cache` runner argument is study-scoped and never reuses the
+non-V2H twin or advanced state. Baseline-cache keys distinguish reference-tail durations.
 
 At most one V2H EV per home receives the full backed-load reference. The usual
 selection is `["heat_pump", "water_heater"]`; home configuration must state it.
@@ -75,7 +84,7 @@ Plant availability, trip energy, projection and safety update every plant step.
 Prediction blocks may split at events without introducing extra control decisions.
 
 Canonical trips contain departure, arrival and distance_km. Vehicle consumption
-converts arrival distance to energy; SOC uses current faded capacity.
+converts trip distance to energy debited at departure; SOC uses current faded capacity.
 NHTS annual replay may wrap. Audi uses seeded interior replay with sufficient
 history/future and no wrapping; Audi SOC/energy fields infer distance using the
 Audi reference vehicle, not the simulated vehicle's driving demand.
@@ -86,7 +95,7 @@ equalize ending SOC or remove finite-horizon incentives.
 
 ## Forecasts
 
-- **Perfect:** realized exogenous schedules and the non-V2H twin reference.
+- **Perfect:** realized exogenous schedules and the selected baseline/twin reference.
 - **Deterministic:** explicit external JSON snapshots, latest `issued_at <=`
   solve time, complete finite plant-grid coverage and declared units.
 - **EV scenario:** implemented historical paths; see [scenarios](scenarios.md).
@@ -103,17 +112,35 @@ tariff is retained separately for terminal valuation.
 
 ## EV constraints and costs
 
-Both formulations keep hard SOC [0,1] bounds and full forecast arrival energy.
-There is no trip-shortfall slack; impossible forecast trips can cause fallback.
-Only the physical plant saturates finite SOC, recording clipping/unserved trips.
+Both formulations keep hard SOC [0,1] bounds before and after departure. At forecast departures, a bounded
+unmet-driving-energy slack is limited by that trip's distance-derived demand and
+penalized as `trip_weight * sum(unmet_kWh) / (current_capacity_kWh * trip_count)`.
+Count new departures strictly after the measured initial state and before horizon
+end, including zero-distance trips; zero trips gives zero cost. There is no dt/N
+factor. Scenario MPC takes the maximum path trip cost separately from maximum
+comfort cost. Predicted slack is recorded in plans/solve diagnostics.
+The physical plant still attempts the full realized trip, saturates finite SOC,
+and independently records actual clipping/unserved energy at departure. Arrivals
+only restore availability. Initial SOC is already net of any ongoing trip.
+The plant blocks both charge and discharge while away and logs rejected commands.
+Pre-departure SOC is retained for departure-comfort metrics and rainflow peaks.
+The default `trip_weight` is 10,000 (also explicit in the supplied templates).
+This remains a soft preference, not lexicographic priority. Large unavoidable
+shortfall costs can inflate the absolute error permitted by a relative MIP gap.
+Trip-count averaging reduces each individual trip's marginal penalty in busy
+horizons; worst-case scenario aggregation does not make this a hard guarantee.
+Use a new study/output directory for departure accounting: old checkpoints and
+arrival-accounted cached baselines are not compatible. Do not pool old/new cohorts.
 
 Convex uses one signed battery-side power with efficiency-aware piecewise AC power;
 MILP uses exclusive charge/discharge/idle modes. Lossy bidirectional convex
 intervals reject negative prices rather than silently clip prices or switch solver.
 
-Comfort penalizes **pre-departure** shortfall, averaged over departures (zero if
-none). Health limits penalize SOC-band violations throughout the horizon.
-Electricity, health and persistence use dt/N; cumulative degradation uses /N.
+Comfort currently penalizes `max(comfort_soc_min - x_j, 0)` throughout the horizon,
+including away periods, using dt/N. It is a soft reserve, not departure-only.
+Departure-comfort metrics still use the measured pre-debit SOC. Health limits
+penalize SOC-band violations throughout. Electricity, comfort, health and
+persistence use dt/N; cumulative degradation uses /N.
 MILP persistence penalizes changes in mode indicators; convex uses chemical-power
 variation. Details and calibration are in [degradation](degradation.md).
 
@@ -142,6 +169,9 @@ the configured gap (default 5%). Rainflow requires whole-objective certification
 and a separate dollar envelope-accuracy check on every scenario.
 See [degradation](degradation.md).
 
+EV Gurobi solves default to `DualReductions=0` so diagnostics distinguish
+infeasible from unbounded models without a second backend solve. Explicit
+per-EV solver options can override this; HPWH solver settings are unchanged.
 Unaccepted EV plans use immediate charging toward comfort minimum without V2H
 until the next scheduled solve. HPWH retains its prior target through existing
 actuator logic. Failures, limits, physical overrides and projection are recorded.

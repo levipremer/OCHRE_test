@@ -20,12 +20,14 @@ def main(argv=None):
     mode.add_argument("--smoke-test", action="store_true", help="Separate two-config validation: 15-minute warm-up + 30-minute evaluation")
     parser.add_argument("--configurations", nargs="+")
     parser.add_argument("--cases", nargs="+")
+    parser.add_argument("--no-progress", action="store_true", help="Suppress job/case/timestep progress (not OCHRE messages)")
     args = parser.parse_args(argv)
     manifest = stage_study(args.study_config, ROOT, output_directory=args.output_directory, smoke=args.smoke_test)
     doc = read_json(manifest)
     print(f"Staged {len(doc['cases'])} cases / {len(doc['jobs'])} configurations: {manifest}")
     if args.run or args.smoke_test:
-        run_study(manifest, configuration_ids=args.configurations, case_ids=args.cases)
+        run_study(manifest, configuration_ids=args.configurations, case_ids=args.cases,
+                  progress=not args.no_progress)
         print("Selected study jobs complete; reports and trajectories saved.")
     else:
         print("No simulations executed.")

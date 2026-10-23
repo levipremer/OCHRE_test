@@ -2,21 +2,35 @@
 
 [Guide index](../../README.md)
 
-The repository-wide suite is **not currently green**. Historical reports describe
-what was actually run at their dates; they are not fresh claims about this checkout.
+The repository-wide suite is **not currently green**. This index replaces five
+overlapping historical validation reports; their committed versions remain in Git.
+Current formulations are documented in the pipeline, scenario and battery guides.
 
-- [Scenario validation, October 17](ev_scenario_2026-10-17.md): 21 scenario tests
-  passed; full discovery recorded 126 legacy errors and eight terminal assertions
-  across three tests. Full discovery preceded four final scenario additions.
-- [Dynamic SOH validation](ev_soh.md)
-- [Earlier EV/V2H validation](ev_v2h.md)
-- [Earlier unified validation](unified.md)
-- [Cleanup validation](cleanup_2026-10-17.md)
+## Recorded checks and open discrepancies
 
-Relative paths inside historical reports refer to their original example folder
-or the repository root. The legacy terminal tests expect daily mean tariff;
-the approved runtime behavior is daily minimum. Those expectations are deliberately
-not changed or skipped in this cleanup. Old reports can describe superseded economics.
+- October 23 conditional-prefix revision: 31 scenario/reporting tests passed,
+  including the three-case simulation and convex/MILP solver fixtures.
+- October 23 optional-twin revision: 50/51 broader checks passed, including
+  two-/three-case simulations, config loading, baseline caching and plots.
+  Two additional two-case study aggregation/retrofit checks passed.
+- Six supplied control/study JSON documents loaded and validated after setting
+  `run_non_v2h_twin=false`. Older frozen snapshots were not rewritten.
+- Historical October 17 full discovery recorded 126 legacy errors and eight
+  terminal assertions. That is historical evidence, not a current full-suite count.
+
+Known mismatches retained rather than silently changed/skipped:
+
+1. Older terminal tests expect daily mean tariff; runtime intentionally uses minimum.
+2. A departure-energy test expects departure-only comfort; current user-edited OCP
+   penalizes the soft SOC floor throughout the horizon. Departure metrics remain pre-debit.
+3. The progress test expects phase/final callbacks to print; current StudyProgress
+   deliberately suppresses per-step/phase messages.
+
+This push-preparation pass changes documentation/comments and removes redundant
+notes, not formulations or test expectations. No full study or full discovery is
+rerun as part of this budget-conscious cleanup. Four baseline-cache and six
+retrofit-plot tests passed. Lightweight check results are in
+[PUSH_README.md](../../../../PUSH_README.md).
 
 ## Reproduce
 
@@ -26,7 +40,7 @@ From the repository root, using the existing environment:
 New-Item -ItemType Directory -Force .test-tmp | Out-Null
 $env:TEMP = Join-Path (Get-Location) '.test-tmp'
 $env:TMP = $env:TEMP
-.\.venv\Scripts\python.exe -m unittest test.test_ev_scenario test.test_ev_soh test.test_ev_degradation test.test_unified_hems test.test_unified_controls test.test_unified_warmup test.test_ev_study -q
+.\.venv\Scripts\python.exe -m unittest test.test_ev_scenario test.test_ev_departure_energy test.test_ev_reporting test.test_ev_soh test.test_ev_degradation test.test_unified_hems test.test_unified_controls test.test_unified_warmup test.test_ev_study test.test_ev_baseline_cache test.test_ev_retrofit_plot -q
 .\.venv\Scripts\python.exe -m unittest discover -s test -q
 ```
 

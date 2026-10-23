@@ -10,6 +10,8 @@ SAVINGS_METRICS = ("operating_cost_savings_usd", "degradation_cost_savings_usd",
                    "energy_adjusted_net_savings_usd")
 FORECAST_METRICS = tuple("forecast_"+m for m in (
     "brier_home", "false_home", "false_away", "arrival_energy_mae_kwh",
+    "departure_energy_mae_kwh", "departure_horizon_energy_mae_kwh",
+    "departure_energy_coverage", "departure_energy_sharpness_kwh",
     "horizon_energy_mae_kwh", "energy_coverage", "energy_sharpness_kwh",
     "next_trip_energy_mae_kwh", "no_scenarios_fraction"))
 
@@ -70,17 +72,19 @@ def plot_cases(cases, home, root, dpi, metrics=None):
                 plot_metric_bars(rows, FORECAST_METRICS, "case",
                     f"{home.home_id}: {device}, final scenario forecast (prefix included)",
                     directory/f"{device}_forecast_accuracy.png", dpi)
-                fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
+                fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
                 for case, data in cases.items():
                     tables = data.get("forecast_errors", {}).get(device)
                     if tables is None or tables[1].empty:
                         continue
                     lead = tables[1]
-                    for axis, metric in zip(axes, ("brier_home", "arrival_energy_mae_kwh")):
+                    for axis, metric in zip(axes, ("brier_home", "departure_energy_mae_kwh", "arrival_energy_mae_kwh")):
+                        if metric not in lead:  # pre-departure-accounting historical outputs
+                            continue
                         grouped = lead.assign(weighted=lead[metric]*lead.duration_hours).groupby("lead_minutes")
                         score = grouped.weighted.sum()/grouped.duration_hours.sum()
                         axis.plot(score.index, score, marker=".", label=case)
-                for axis, ylabel in zip(axes, ("Home Brier score", "Arrival-energy MAE (kWh)")):
+                for axis, ylabel in zip(axes, ("Home Brier score", "Departure-energy MAE (kWh)", "Arrival-energy MAE (kWh)")):
                     axis.set_ylabel(ylabel)
                     axis.grid(alpha=.2)
                     if axis.get_legend_handles_labels()[0]:

@@ -1,6 +1,6 @@
 """Two-stage EV MPC: shared first command, path-specific future recourse.
 
-min max_s J_comfort,s + mean_s(sum of all remaining weighted costs).
+min max_s J_comfort,s + max_s J_trip,s + mean_s(all remaining costs).
 Dynamics, optional constraints, and cost normalization come from ev.py.
 """
 import time
@@ -11,7 +11,7 @@ from .solver import LIMIT_SECONDS, solve_ocp, usable_solution
 
 
 def build_scenario_problem(controller, timestamp, initial_soc, scenarios):
-    """Share the first command; minimize worst-path comfort and mean other costs."""
+    """Separate worst-path comfort/trip costs; arithmetic mean of other costs."""
     from .ev import build_ev_problem
     if not scenarios.forecasts:
         raise ValueError("EV scenarios need paired Forecast objects")
@@ -40,7 +40,7 @@ def build_scenario_problem(controller, timestamp, initial_soc, scenarios):
     terms = {}
     for key in plans[0]["objective_terms"]:
         costs = [p["objective_terms"][key] for p in plans]
-        terms[key] = cp.max(cp.hstack(costs)) if key == "comfort" else sum(costs)/len(plans)
+        terms[key] = cp.max(cp.hstack(costs)) if key in {"comfort", "trip_shortfall"} else sum(costs)/len(plans)
     problem = cp.Problem(cp.Minimize(sum(terms.values())), constraints)
     if not problem.is_dcp():
         raise ValueError("EV scenario formulation is not DCP")
@@ -118,7 +118,7 @@ def solve_rainflow(controller, problem, plan, options, deadline):
         if last_error or not usable_solution(master):
             break
         lower = max(lower, master_lower_bound(master, o.solver))
-        socs = [p["state"].value.copy() for p in paths]
+        socs = [p["rainflow_state"].value.copy() for p in paths]
         costs, gradients = evaluate(socs)
         objective = float(base.value)+float(np.dot(scales, costs))
         if objective < upper:
@@ -138,7 +138,7 @@ def solve_rainflow(controller, problem, plan, options, deadline):
             socs, costs = best_soc, best_cost
             _, gradients = evaluate(socs)
         for p, value, gradient, soc, cuts_s in zip(paths, costs, gradients, socs, planes):
-            constraints.append(p["rainflow_theta"] >= value+gradient@(p["state"]-soc))
+            constraints.append(p["rainflow_theta"] >= value+gradient@(p["rainflow_state"]-soc))
             cuts_s.append((value, gradient.copy(), soc.copy()))
             cuts += 1
     if best is not None:

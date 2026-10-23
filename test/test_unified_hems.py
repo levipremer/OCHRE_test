@@ -21,6 +21,24 @@ from examples.single_home_hems.single_home_hems.controllers.ev import EVMPCContr
 from examples.single_home_hems.single_home_hems.unified import run_home, make_controllers, CASES
 
 
+class OptionalTwinConfigTests(unittest.TestCase):
+    def test_load_optional_twin_default_and_strict_boolean(self):
+        directory = ROOT/"examples/single_home_hems/config"
+        document = json.loads((directory/"unified_control.json").read_text())
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            path = Path(tmp)/"control.json"
+            for value in (True, False, "omitted", "false", 0, None):
+                document.pop("run_non_v2h_twin", None)
+                if value != "omitted":
+                    document["run_non_v2h_twin"] = value
+                path.write_text(json.dumps(document))
+                if value is None or value == "false" or type(value) is int:
+                    with self.assertRaisesRegex(ValueError, "run_non_v2h_twin must be boolean"):
+                        load_unified(directory/"unified_home.json", path, ROOT)
+                else:
+                    cfg = load_unified(directory/"unified_home.json", path, ROOT)
+                    self.assertEqual(cfg.run_non_v2h_twin, value is not False)
+
 class UnifiedConfigTests(unittest.TestCase):
     def test_examples_load_and_split_physics_from_preferences(self):
         c = load_unified(ROOT/"examples/single_home_hems/config/unified_home.json",

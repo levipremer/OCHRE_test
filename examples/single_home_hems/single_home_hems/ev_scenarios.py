@@ -53,35 +53,66 @@ def scenario_settings(forecast, control_minutes, horizon_hours):
 
 
 def persistent_prefix(mobility, timestamp, horizon, duration, available, plant_step):
-    """Overwrite availability and carry overwritten arrival demand to next arrival.
+    """Correct mismatched current state on [now, boundary); debit departures.
 
-    Exact boundary arrivals are delayed too (next arrival must be AFTER prefix).
-    If no such arrival is in this horizon, retain deferred-distance diagnostics.
-    The measured state always anchors the first plant interval, even at prefix=0.
+    Matching paths are unchanged, including transitions within the prefix.
+    Home: discard trips ending within the prefix; shorten a crossing trip to
+    depart at its endpoint, retaining its full distance. Never compound trips.
+    Away: extend the ongoing absence, with zero new energy for that already
+    debited trip; suppress any new departures absorbed into that absence.
+    On a mismatch, prefix=0 still anchors the first plant interval.
     """
+    scenario_home = bool(mobility.available([timestamp])[0])
+    mismatch = scenario_home != bool(available)
+    metadata = dict(mobility.metadata, prefix_applied=mismatch,
+        prefix_original_state="home" if scenario_home else "away",
+        prefix_state="home" if available else "away", trip_energy_timing="departure")
+    if not mismatch:
+        return replace(mobility, metadata=dict(metadata, prefix_end=str(timestamp),
+            original_distance_km=float(mobility.trips.distance_km.sum()),
+            retained_distance_km=float(mobility.trips.distance_km.sum()),
+            ignored_distance_km=0.0, ignored_trip_count=0,
+            shifted_trip_count=0, shifted_trips=[], shifted_distance_outside_horizon_km=0.0))
     end = timestamp + horizon
     boundary = timestamp + max(duration, plant_step)
-    trips = mobility.trips.copy()
-    overwritten = trips.loc[(trips.arrival > timestamp) & (trips.arrival <= boundary)]
-    pending = float(overwritten.distance_km.sum())
+    trips = mobility.trips.loc[(mobility.trips.arrival > timestamp) &
+                               (mobility.trips.departure < end)].copy()
+    overwritten = trips.loc[trips.arrival <= boundary]
+    ignored = float(overwritten.distance_km.sum())
+    ignored_count = len(overwritten)
     retained = trips.loc[trips.arrival > boundary].copy()
-    retained = retained.loc[retained.departure < end].reset_index(drop=True)
-    deferred = pending
-    if not retained.empty:
-        if available:
-            retained.loc[0, "departure"] = max(boundary, retained.loc[0, "departure"])
-        else:
-            # Already away, not a newly predicted departure at the solve instant.
-            retained.loc[0, "departure"] = timestamp - plant_step
-        retained.loc[0, "distance_km"] += pending
-        if retained.loc[0, "arrival"] <= end:
-            deferred = 0.0
+    retained = retained.reset_index(drop=True)
+    shifted = []
+    if available and not retained.empty and retained.loc[0, "departure"] < boundary:
+        row = retained.iloc[0]
+        shifted.append(dict(original_departure=str(row.departure), departure=str(boundary),
+                            arrival=str(row.arrival), distance_km=float(row.distance_km),
+                            remaining_absence_fraction=float((row.arrival-boundary)/(row.arrival-row.departure))))
+        retained.loc[0, "departure"] = boundary
     elif not available:
-        retained = pd.DataFrame([dict(departure=timestamp-plant_step,
-            arrival=end+plant_step, distance_km=pending)])
-    metadata = dict(mobility.metadata, prefix_end=str(boundary),
-        prefix_state="home" if available else "away", overwritten_distance_km=pending,
-        deferred_distance_km=deferred)
+        # No fabricated home interval or second debit at the prefix endpoint.
+        # Absorb crossing/touching absences until a genuine home gap is possible.
+        return_time = boundary
+        count = 0
+        for row in retained.itertuples():
+            if row.departure > return_time:
+                break
+            return_time = max(return_time, row.arrival)
+            ignored += float(row.distance_km)
+            ignored_count += 1
+            count += 1
+        retained = retained.iloc[count:]
+        ongoing = pd.DataFrame([dict(departure=timestamp-plant_step,
+                                    arrival=return_time, distance_km=0.0)])
+        retained = pd.concat([ongoing, retained], ignore_index=True)
+    remaining = float(retained.distance_km.sum())
+    if not np.isclose(float(trips.distance_km.sum()), ignored+remaining):
+        raise ValueError("EV prefix trip-distance accounting does not reconcile")
+    metadata = dict(metadata, prefix_end=str(boundary),
+        original_distance_km=float(trips.distance_km.sum()), ignored_distance_km=ignored,
+        ignored_trip_count=ignored_count, retained_distance_km=remaining,
+        shifted_trip_count=len(shifted), shifted_trips=shifted,
+        shifted_distance_outside_horizon_km=float(retained.loc[retained.departure >= end, "distance_km"].sum()))
     return EVSchedule(retained, timestamp, end+plant_step, metadata)
 
 
@@ -93,6 +124,7 @@ class ScenarioEVForecast:
         self.forecast_length = pd.Timedelta(hours=control.get("forecast_hours", control["horizon_hours"]))
         self.settings = scenario_settings(control["forecast"], self.control_minutes, control["horizon_hours"])
         self.history = []
+        self.backed_load_source = "shared non_v2h_twin trajectory"
         # Store final forecasts, not future truth. Scoring happens after simulation.
         self.issued_forecasts = []
 
@@ -166,7 +198,7 @@ class ScenarioEVForecast:
             forecast_hours=horizon.total_seconds()/3600, knn_history_hours=cfg["knn_history_hours"],
             candidate_count=len(ranked), incomplete_bout_exclusions=excluded,
             overlap_rejections=overlap_rejected, prefix_control_intervals=cfg["prefix_control_intervals"],
-            probability_policy="uniform", backed_load_source="shared non-V2H twin trajectory")
+            probability_policy="uniform", backed_load_source=self.backed_load_source)
         if not selected:
             self.issued_forecasts.append((timestamp, horizon, ()))
             self.history.append(dict(diagnostics, fallback_reason="no_complete_historical_scenarios"))
@@ -187,7 +219,8 @@ class ScenarioEVForecast:
             ids.append(candidate_id)
             records.append(path.metadata)
             forecasts.append(replace(realized, ev_schedules={**realized.ev_schedules, self.vehicle_id: path}, providers={}))
-        diagnostics.update(candidate_ids=ids, candidates=records, optimization_probability=1/len(paths))
+        diagnostics.update(candidate_ids=ids, candidates=records, optimization_probability=1/len(paths),
+                           prefix_applied_count=sum(r["prefix_applied"] for r in records))
         self.history.append(diagnostics)
         self.issued_forecasts.append((timestamp, horizon, tuple(paths)))
         return EVScenarioSet(timestamp, tuple(paths), tuple(f.backed_load_kw for f in forecasts),

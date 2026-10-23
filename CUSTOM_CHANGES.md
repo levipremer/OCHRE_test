@@ -1,5 +1,129 @@
 # Changes from base OCHRE
 
+## 2026-10-23: Optional non-V2H comparison
+
+- Top-level control `run_non_v2h_twin` defaults to true; a study may override it.
+  False runs only baseline and advanced, using baseline's realized backed loads.
+- Extend the selected reference through the final forecast horizon; exclude this
+  tail from scored metrics. Reports, figures and saved case/source metadata omit
+  the skipped twin. Baseline caching remains keyed by the full simulation window.
+- Validation: two-/three-case simulation, strict config loading, study staging/
+  aggregation, retrofit plots and cache checks passed. Broader suite: 50/51 pass;
+  the existing progress test expects phase messages that current StudyProgress
+  deliberately suppresses. Left that unrelated behavior unchanged. Two additional
+  optional-twin aggregation/plot checks passed after expanding their coverage.
+
+## 2026-10-23: Conditional EV scenario persistence
+
+- Apply the persistent prefix only when scenario and measured current availability
+  differ; matching scenarios retain near-term trips and returns unchanged.
+- Preserve departure-energy shifting/discarding rules on corrected paths and
+  already-debited ongoing-trip handling. Record per-path application and counts.
+- Use a new study cohort for this forecast-policy change; existing outputs and
+  HPWH formulations are unchanged.
+- Validation: 31 scenario/reporting tests passed, including three-case simulation
+  and MILP/convex solver checks. Departure tests additionally exposed the existing
+  departure-only comfort assertion versus the current all-time comfort objective;
+  neither that objective nor its conflicting assertion was changed here.
+
+## 2026-10-22: Departure energy and worst-path trip protection
+
+- Debit realized/predicted driving energy at departure; retain pre-debit comfort
+  states and both sides of the impulse in rainflow. Ongoing trips are already
+  included in measured initial SOC; returns restore availability only.
+- Prefix-covered trips are discarded; partially covered home-to-away departures
+  shift to the prefix endpoint with full distance, without compounding.
+- Average capacity-normalized trip slack over new trips in every EV formulation;
+  scenario MPC separately maximizes comfort and trip costs, averaging other costs.
+- Explicit plant away-actuation rejection diagnostics; departure forecast scores
+  and plots alongside legacy arrival scores; accounting version saved in outputs.
+- Old battery checkpoints/cached baselines cannot be reused under the new timing.
+  Use a new output cohort. HPWH formulation and numerical EV weights unchanged.
+- Validation: 128 EV/study tests passed; 72 degradation, integration, unified
+  and HPWH regression tests passed (two temporary-folder tests rerun with a
+  writable workspace temp root). Includes real three-case and multi-home smoke
+  simulations, SCIPY/CLARABEL/GUROBI fixtures, and rainflow certification.
+  No full study executed; this was not an exhaustive repository test run.
+
+## 2026-10-19: Batched EV forecast scoring and horizon preparation
+
+- Batch availability/arrival-bin queries once per path/issuance, preserving
+  half-open bins, partial-horizon weights, prefix handling and missing ensembles.
+- Slice sorted minute data at exact mobility/control boundaries instead of
+  repeated pandas masks. Objective, dynamics, aggregation and solvers unchanged.
+- Before/after microbenchmark: identical score tables and horizon arrays;
+  approximately 7x faster scoring and 1.9x faster horizon preparation on the
+  small fixture (not an end-to-end runtime claim).
+- Added an exact-patch, idle-only maintenance/resume launcher. Completed output
+  hashes remain enforced; timing cohorts are recorded before resuming.
+- Active study is not interrupted. Parallel workers and OCP-template caching
+  are deferred; no HPWH code changes.
+- Validation: 78 focused tests passed outside sandbox temp-folder restrictions;
+  read-only migration preflight verified frozen inputs and 10 completed jobs.
+
+## 2026-10-19: Read-only EV trajectory retrofit
+
+- Added tools/plot_ev_trajectories.py: two-panel SOC/realized-mode comparison,
+  transparent right-axis price, optional date zoom, PNG/SVG exports.
+- Outputs stay outside frozen run folders; simulation code and fingerprints
+  are unchanged. Availability overrides zero-power idle when the EV is away.
+- Added coverage for actual modes, SOC endpoint timing, tariff/grid alignment,
+  overwrite protection and preservation of source CSVs.
+
+## 2026-10-19: Nonfatal baseline-cache publication locks
+
+- The horizon study completed its first job, then Windows denied the second
+  baseline cache's directory rename (WinError 5), before MPC execution.
+- Retry publication access locks with bounded backoff. If still denied, retain
+  the valid simulated result and continue uncached, recording the warning and
+  publication error. Existing-cache hash verification remains strict.
+- Completed results and failed attempt directories remain untouched. Resume
+  provenance records only this storage-only patch, not a blanket hash bypass.
+- Validation: 27 study/cache tests passed, including transient/permanent lock
+  fixtures; a two-job GUROBI smoke run completed with zero failed solves and
+  cache reuse. The completed research job passed resume verification and was
+  skipped; the remaining research jobs were not launched.
+
+## 2026-10-19: Study progress and horizon/bank grid
+
+- Deterministic/scenario study CLI reports jobs, case phases, simulated-step
+  progress, elapsed time, verified skips and baseline-cache reuse. Optional
+  `--no-progress`; no solver/objective changes or relaxed resume checks.
+- Added a stage-only 54-job definition: existing MILP health/comfort/terminal
+  objective, five hierarchical scenarios, 14/21/28-day banks x 6/12/24-hour
+  horizons x six paired situations. Largest-window mobility coverage is reserved.
+- Added separate twin/V2H heatmaps for savings, service/aging, forecast quality
+  and computation; no averaging across bank/horizon factors. Missing data is N/A.
+- Smoke validation now shortens per-variant horizons as well as common settings.
+  Existing outputs and running processes are not modified.
+
+## 2026-10-18: Windows baseline-cache path repair
+
+- Cache filesystem operations use Windows extended paths. Publishing a short
+  temporary directory under its full SHA256 key previously made 262-character
+  equipment paths unreadable despite their files being present.
+- Verified the affected ev_scenario_gurobi_health cache and completed outputs.
+  Recorded the storage-only source change in its manifest for resume; preserved
+  completed/failed attempt records. General code/environment guards remain.
+- Added a Windows regression covering publication and reuse beyond MAX_PATH.
+
+## 2026-10-18: EV forecast trip feasibility
+
+- Deterministic and scenario EV MPC share bounded unmet-trip-energy slack while
+  retaining hard SOC bounds. Approved default penalty: 10,000 times unmet kWh
+  divided by measured faded capacity; scenario costs are averaged. Realized
+  plant trips and actual unserved-energy accounting remain unchanged.
+- Plans, solve histories, run reports and study summaries distinguish predicted
+  shortfall from physical unmet energy. EV Gurobi defaults to DualReductions=0
+  for one-call infeasibility classification; HPWH settings are unchanged.
+- Updated control templates, guides and regression coverage. Existing frozen
+  studies/results are preserved; this revision requires a new study directory.
+- Validation: 168 EV/unified/study regression tests passed. Two formerly
+  infeasible saved forecast cases now solve with both GUROBI and SCIPY. The
+  wider check still exposes eight known mean-versus-minimum terminal-price
+  assertions and the missing legacy parametric_study.analysis import; those
+  modules were excluded from the 168-test passing run. No research study run.
+
 ## 2026-10-17: Repository cleanup and documentation consolidation
 
 - Current user guides are indexed by examples/single_home_hems/README.md and
@@ -15,7 +139,7 @@
 - Generated caches are ignored; orphan tmpx5j91pta outputs moved to ignored
   .test-tmp/cleanup_recovery_2026-10-17 for recovery. Datasets/results are retained.
 - Source hashes change even for cleanup; frozen-study checks are not bypassed.
-  Validation and known limitations: [cleanup report](examples/single_home_hems/docs/validation/cleanup_2026-10-17.md).
+  Historical validation notes consolidated in the [validation index](examples/single_home_hems/docs/validation/README.md).
 
 ## 2026-10-17: Scenario-based EV MPC — finalized
 
@@ -326,7 +450,7 @@ Git commit or upstream release.
   adapters, formulations, physical accounting, independent EV settings, projection,
   failure handling, real OCHRE, EV+HPWH, and five-home integration.
 - [Archived EV/V2H guide](archive/development_docs_2026-10-17/EV_V2H.md) and
-  [validation report](examples/single_home_hems/docs/validation/ev_v2h.md).
+  [validation index](examples/single_home_hems/docs/validation/README.md).
 
 ### Integrated and preserved
 
@@ -402,7 +526,7 @@ Git commit or upstream release.
 - Added 15 unified tests. Full discovery: 173 passes, 126 existing legacy errors,
   zero assertion failures. No research comparison studies were launched.
 - Added [unified guide (archived)](archive/development_docs_2026-10-17/UNIFIED_PIPELINE.md) and
-  [validation checkpoint](examples/single_home_hems/docs/validation/unified.md).
+  [validation index](examples/single_home_hems/docs/validation/README.md).
 - User approved finalization; nothing staged or committed.
 - Finished the [legacy archive](archive/legacy_hems_2026-10-07/README.md):
   55 committed source/config/document/model files verified against the export

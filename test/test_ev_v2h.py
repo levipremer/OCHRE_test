@@ -96,12 +96,14 @@ class EVPlantTests(unittest.TestCase):
         plant = self.plant(trips=[(0, 2, 100)])
         first = self.step(plant, -4)
         self.assertAlmostEqual(first[f"{plant.results_name} Unmet Load (kWh)"], 15)
+        self.assertEqual(plant.trip_energy, 5)
+        self.assertEqual(plant.trip_unmet, 15)
         self.assertEqual(plant.electric_kw, 0)
         self.step(plant, 4)
         self.step(plant, 0)
         self.assertEqual(plant.soc, 0)
-        self.assertEqual(plant.trip_energy, 5)
-        self.assertEqual(plant.trip_unmet, 15)
+        self.assertEqual(plant.trip_energy, 0)
+        self.assertEqual(plant.trip_unmet, 0)
 
     def test_return_does_not_reset_soc_and_discharge_requires_capability(self):
         plant = self.plant(vehicle(v2h=False), trips=[(0, 1, 5)])
@@ -121,14 +123,16 @@ class EVOCPTests(unittest.TestCase):
         self.assertIn(problem.status, [cp.OPTIMAL, cp.OPTIMAL_INACCURATE])
         return controller, plan
 
-    def test_both_formulations_reject_infeasible_full_trip_demand(self):
+    def test_both_formulations_allow_bounded_unreachable_trip_shortfall(self):
         for formulation, solver in (("convex", "CLARABEL"), ("milp", "SCIPY")):
             with self.subTest(formulation=formulation):
-                ev, m = vehicle(formulation=formulation, solver=solver), schedule([(0, 30, 100)])
+                ev, m = vehicle(formulation=formulation, solver=solver), schedule([(15, 30, 100)])
                 problem, plan = EVMPCController(ev).build_problem(m.start, .5, forecast(ev, m))
+                problem = cp.Problem(problem.objective, problem.constraints+[plan["chemical"] == 0])
                 problem.solve(solver=solver)
-                self.assertEqual(problem.status, cp.INFEASIBLE)
-                self.assertNotIn("shortfalls", plan)
+                self.assertEqual(problem.status, cp.OPTIMAL)
+                self.assertAlmostEqual(plan["trip_shortfall_by_block"].value.sum(), 15, places=5)
+                self.assertAlmostEqual(plan["state"].value[-1], 0, places=5)
 
     def test_milp_modes_exclusive_and_discharge_load_capped(self):
         _, plan = self.solve(vehicle(formulation="milp", solver="SCIPY"), schedule(), load=1)
@@ -136,18 +140,40 @@ class EVOCPTests(unittest.TestCase):
         self.assertTrue(np.all(plan["charge"].value*plan["discharge"].value < 1e-6))
         self.assertGreater(plan["discharge"].value.sum(), 0)
 
-    def test_return_outside_horizon_has_no_invented_trip_slack(self):
+    def test_departure_inside_horizon_includes_demand_even_if_return_is_outside(self):
         _, plan = self.solve(vehicle(), schedule([(30, 180, 100)]))
-        self.assertEqual(plan["horizon"].trip_kwh.sum(), 0)
-        self.assertNotIn("shortfalls", plan)
+        self.assertEqual(plan["horizon"].trip_kwh.sum(), 20)
+        self.assertIsNotNone(plan["trip_shortfall_variable"])
+        self.assertGreater(plan["trip_shortfall_by_block"].value.sum(), 0)
 
     def test_both_formulations_consume_full_trip_energy(self):
-        ev = vehicle(trip_weight=0, health_soc_weight=1000, health_soc_min=0.8)
-        _, plan = self.solve(ev, schedule([(0, 30, 10)]), soc=0.8, price=0)
-        self.assertAlmostEqual(plan["state"].value[2], .6, places=6)
-        _, exact = self.solve(replace(ev, hems=replace(ev.hems, formulation="milp", solver="SCIPY")),
-                              schedule([(0, 30, 10)]), soc=0.8, price=0)
-        self.assertAlmostEqual(exact["state"].value[2], .6, places=6)
+        ev = vehicle(trip_weight=1000, health_soc_weight=1000, health_soc_min=0.8)
+        for kind, solver in (("convex", "CLARABEL"), ("milp", "SCIPY")):
+            e = replace(ev, hems=replace(ev.hems, formulation=kind, solver=solver))
+            _, plan = self.solve(e, schedule([(15, 30, 10)]), soc=0.8, price=0)
+            self.assertAlmostEqual(plan["pre_departure_state"].value[1]-plan["state"].value[1], .2, places=6)
+
+    def test_default_shortfall_weight_preserves_feasible_trip_against_health_cost(self):
+        # Consuming this trip lowers SOC below the health band. The approved
+        # default must not avoid that health cost by inventing unserved driving.
+        for formulation, solver in (("convex", "CLARABEL"), ("milp", "SCIPY")):
+            ev = vehicle(formulation=formulation, solver=solver,
+                         health_soc_weight=1000, health_soc_min=.8)
+            self.assertEqual(ev.hems.trip_weight, 10000)
+            _, plan = self.solve(ev, schedule([(15, 30, 10)]), soc=.8, price=0)
+            self.assertAlmostEqual(plan["trip_shortfall_by_block"].value.sum(), 0, places=5)
+            self.assertAlmostEqual(plan["pre_departure_state"].value[1]-plan["state"].value[1], .2, places=5)
+
+    def test_shortfall_penalty_uses_faded_capacity_without_horizon_dilution(self):
+        for hours in (1, 2):
+            ev = vehicle(initial_soh=.8, horizon_hours=hours)
+            m = schedule([(15, 30, 100)])
+            p, plan = EVMPCController(ev).build_problem(m.start, .5, forecast(ev, m))
+            cp.Problem(p.objective, p.constraints+[plan["chemical"] == 0]).solve(solver=ev.hems.solver)
+            capacity = plan["capacity_kwh"]
+            self.assertAlmostEqual(capacity, 8)
+            self.assertAlmostEqual(plan["trip_shortfall_by_block"].value.sum(), 16, places=5)
+            self.assertAlmostEqual(plan["trip_shortfall"].value, 10000*16/8, places=3)
 
     def test_cycle_cap_and_projection(self):
         ev = vehicle(formulation="milp", solver="SCIPY", max_discharge_starts_24h=0)
@@ -200,9 +226,10 @@ class EVOCPTests(unittest.TestCase):
     def test_hard_soc_bounds_with_zero_trip_penalty(self):
         for formulation, solver in (("milp", "SCIPY"), ("convex", "CLARABEL")):
             _, plan = self.solve(vehicle(formulation=formulation, solver=solver, trip_weight=0),
-                                 schedule([(0, 30, 1)]), soc=.1)
+                                 schedule([(15, 30, 100)]), soc=.1)
             self.assertGreaterEqual(min(plan["state"].value), -1e-7)
             self.assertLessEqual(max(plan["state"].value), 1+1e-7)
+            self.assertGreaterEqual(plan["trip_shortfall_by_block"].value.sum(), 18.1-1e-6)
 
     def test_rolling_cycle_constraint_counts_expiring_history(self):
         ev = vehicle(formulation="milp", solver="SCIPY", max_discharge_starts_24h=1)

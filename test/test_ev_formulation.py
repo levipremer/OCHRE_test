@@ -15,6 +15,24 @@ from examples.single_home_hems.single_home_hems.ev_metrics import ev_metrics
 
 
 class EVMathematicalTests(unittest.TestCase):
+    def test_array_block_reductions_match_timestamp_masks(self):
+        for v2h in (False, True):
+            ev = vehicle(formulation="milp", solver="SCIPY", v2h=v2h)
+            c, m = EVMPCController(ev), schedule([(7, 12, 1), (23, 39, 2)])
+            f = forecast(ev, m)
+            rng = np.random.default_rng(42)
+            f.data["electricity_price_usd_per_kwh"] = rng.uniform(-.1, .5, len(f.data))
+            f.backed_load_kw[:] = rng.uniform(0, 12, len(f.data))
+            h = EVHorizon.from_forecast(c, m.start, f)
+            for j, (a, b) in enumerate(zip(h.t[:-1], h.t[1:])):
+                mask = (f.data.index >= a) & (f.data.index < b)
+                pi = f.data.loc[mask, "electricity_price_usd_per_kwh"].to_numpy()
+                load = f.backed_load_kw.loc[mask].to_numpy()
+                cap = np.minimum(load, ev.hems.max_discharge_kw) if v2h else np.zeros(len(load))
+                np.testing.assert_array_equal(
+                    [h.price[j], h.backed_cost[j], h.discharge_cost[j], h.discharge_mean[j], h.discharge_min[j]],
+                    [pi.mean(), (pi*load).mean(), (pi*cap).mean(), cap.mean(), cap.min()])
+
     def build(self, kind="convex", trips=(), soc=.5, price=1, load=3, **opts):
         ev = vehicle(formulation=kind, solver="SCIPY" if kind == "milp" else "CLARABEL", **opts)
         c, m = EVMPCController(ev), schedule(trips)
@@ -26,7 +44,7 @@ class EVMathematicalTests(unittest.TestCase):
         c, m, f, p, q = self.build(trips=[(7, 12, 1)])
         solve_ocp(p, c.options.solver)
         self.assertEqual(p.status, cp.OPTIMAL)
-        self.assertEqual({v.name() for v in p.variables()}, {"x_ev", "p_chemical"})
+        self.assertEqual({v.name() for v in p.variables()}, {"x_ev", "p_chemical", "trip_shortfall_kwh"})
         h, chemical = q["horizon"], q["chemical"].value
         np.testing.assert_allclose(np.diff(q["state"].value)*10, h.dt*chemical-h.trip_kwh, atol=1e-7)
         np.testing.assert_allclose(q["ac"].value, np.where(chemical >= 0, chemical/.9, chemical*.8), atol=1e-7)
@@ -74,7 +92,7 @@ class EVMathematicalTests(unittest.TestCase):
                                       comfort_soc_min=.4, comfort_weight=1000, v2h=False)
             solve_ocp(p, c.options.solver)
             self.assertEqual(p.status, cp.OPTIMAL)
-            self.assertGreaterEqual(q["state"].value[q["horizon"].departure_indices[0]], .4-1e-6)
+            self.assertGreaterEqual(q["pre_departure_state"].value[q["horizon"].departure_indices[0]], .4-1e-6)
             self.assertLess(q["state"].value[-1], .4)
             self.assertLess(q["comfort"].value, 1e-4)
 
@@ -113,8 +131,9 @@ class EVMathematicalTests(unittest.TestCase):
 
     def test_target_band_soft_even_without_departure_energy(self):
         for kind in ("convex", "milp"):
-            c, _, _, p, q = self.build(kind=kind, trips=[(0, 60, 5)], soc=.1,
+            c, _, _, p, q = self.build(kind=kind, trips=[(15, 60, 5)], soc=.1,
                 health_soc_min=.9, health_soc_max=.95, health_soc_weight=100)
+            p = cp.Problem(p.objective, p.constraints+[q["chemical"] == 0])
             solve_ocp(p, c.options.solver)
             self.assertEqual(p.status, cp.OPTIMAL)
             self.assertAlmostEqual(q["state"].value[-1], 0, places=6)
@@ -187,19 +206,20 @@ class EVMathematicalTests(unittest.TestCase):
             self.assertGreater(q["discharge_future"].value, .09)
 
     def test_discharge_budget_excludes_driving(self):
-        c, _, _, p, q = self.build(trips=[(0, 60, 5)], enforce_discharge_budget=True, discharge_budget_soc=0)
+        c, _, _, p, q = self.build(trips=[(15, 60, 5)], enforce_discharge_budget=True, discharge_budget_soc=0)
         solve_ocp(p, c.options.solver)
         self.assertEqual(p.status, cp.OPTIMAL)
         self.assertAlmostEqual(q["state"].value[-1], .4, places=6)
         self.assertAlmostEqual(q["discharge_future"].value, 0, places=6)
 
-    def test_infeasible_trip_fallback_tracks_target_and_preserves_solve_clock(self):
+    def test_unreachable_trip_uses_soft_slack_and_preserves_solve_clock(self):
         c, m, f, _, _ = self.build(trips=[(7, 12, 100)])
         key = c.equipment_name
         action = c.controls_for_step(m.start, {f"{key} SOC (-)": .199, f"{key} SOH (-)": 1.}, {}, f)
-        self.assertTrue(c.fallback)
-        self.assertEqual(c.solve_history[0]["status"], "infeasible")
-        self.assertAlmostEqual(action[key]["P Setpoint"], .001*10*60/.9)
+        self.assertFalse(c.fallback)
+        self.assertEqual(c.solve_history[0]["status"], "optimal")
+        self.assertGreater(c.solve_history[0]["predicted_trip_shortfall_kwh_max"], 0)
+        self.assertGreater(action[key]["P Setpoint"], 0)
         action = c.controls_for_step(m.start+pd.Timedelta(minutes=7), {f"{key} SOC (-)": .2, f"{key} SOH (-)": 1.}, {}, f)
         self.assertEqual(action[key]["P Setpoint"], 0)
         self.assertEqual(len(c.solve_history), 1)
@@ -248,7 +268,6 @@ class EVAcceptanceAndPlantTests(unittest.TestCase):
             self.assertEqual(out[f"{plant.results_name} SOC Saturation"], 1)
             self.assertAlmostEqual(out[f"{plant.results_name} SOC Clipped Energy (kWh)"], 1)
         plant = fixture.plant(trips=[(0, 1, 100)])
-        fixture.step(plant, 0)
         out = fixture.step(plant, 0)
         self.assertEqual(plant.soc, 0)
         self.assertEqual(out[f"{plant.results_name} Trip Unserved Energy (kWh)"], 15)

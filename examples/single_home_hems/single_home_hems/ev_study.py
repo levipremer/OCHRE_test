@@ -1,4 +1,4 @@
-"""Frozen, resumable EV comparisons using the unified three-case runner.
+"""Frozen, resumable EV comparisons using the unified optional-twin runner.
 
 Staging never simulates a home. Unsupported planned formulations are retained
 in the manifest and rejected explicitly when selected for execution.
@@ -8,6 +8,7 @@ from dataclasses import replace
 import hashlib
 import importlib.metadata
 import json
+from itertools import product
 from pathlib import Path
 import platform
 import re
@@ -18,9 +19,66 @@ import pandas as pd
 from examples.five_home_block.five_home_block.ev_schedule import EVSchedule, build_ev_schedules
 from .control_config import EV_CONTROL, keys, load_unified, merge
 from .unified import run_unified
+from .ev_scenarios import scenario_settings
 
 METHODS = {"none", "linear_throughput", "rainflow", "rainflow_multicut"}
 PLANNED = {"rainflow_smoothed", "rainflow_hh"}
+REPLAY_VERSION = 2  # Anchor simulation start, never the beginning of stored history.
+
+
+class StudyProgress:
+    """Minimal progress: print only job index and ID at job start."""
+
+    def __init__(self, total, interval_seconds=30):
+        self.total = total
+        self.started = time.perf_counter()
+
+    def message(self, msg):
+        minutes = (time.perf_counter() - self.started) / 60
+        print(f"[{minutes:.1f} min] {msg}", flush=True)
+
+    def begin(self, index, job_id):
+        # Print exactly once per job
+        self.message(f"job {index}/{self.total}: {job_id}")
+
+    def __call__(self, **kwargs):
+        # Suppress all other progress messages
+        return
+
+
+
+def expand_configurations(study):
+    """Expand labeled Cartesian axes into ordinary, independently frozen jobs."""
+    if "configuration_axes" not in study:
+        return study
+    if "configurations" in study:
+        raise ValueError("Use configurations OR configuration_axes, not both")
+    study = deepcopy(study)
+    axes = study.pop("configuration_axes")
+    if not isinstance(axes, dict) or not axes:
+        raise ValueError("configuration_axes must be a nonempty object")
+    for name, entries in axes.items():
+        identifier(name)
+        if not isinstance(entries, list) or not entries:
+            raise ValueError(f"Empty configuration axis: {name}")
+        ids = []
+        for entry in entries:
+            keys(entry, {"id", "value", "ev_controls"}, f"axis {name}")
+            ids.append(identifier(entry["id"]))
+            if not isinstance(entry.get("value", entry["id"]), (str, int, float)):
+                raise ValueError("Axis value must be a scalar label")
+            keys(entry["ev_controls"], EV_CONTROL | {"forecast", "forecast_hours"}, name)
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"Duplicate IDs in axis {name}")
+    study["configurations"] = []
+    for combination in product(*axes.values()):
+        controls = {}
+        for entry in combination:
+            controls = merge(controls, entry["ev_controls"])
+        study["configurations"].append(dict(id="__".join(e["id"] for e in combination),
+            factors={name: entry.get("value", entry["id"]) for name, entry in zip(axes, combination)},
+            ev_controls=controls))
+    return study
 
 
 def digest(value):
@@ -95,13 +153,16 @@ def restore_schedule(data):
 
 
 def shift_schedule(data, start):
-    """Replay one frozen source trace at another calendar date, without resampling."""
+    """Shift the simulation anchor while retaining all preceding source history."""
     schedule = restore_schedule(data)
-    delta = pd.Timestamp(start)-schedule.start
+    anchor = pd.Timestamp(schedule.metadata.get("simulation_start",
+        schedule.start + pd.Timedelta(days=schedule.metadata.get("history_days", 0))))
+    delta = pd.Timestamp(start)-anchor
     trips = schedule.trips.copy()
     for column in ("departure", "arrival"):
         trips[column] += delta
-    metadata = dict(schedule.metadata, replay_anchor=str(schedule.start),
+    metadata = dict(schedule.metadata, replay_anchor=str(anchor), simulation_start=str(start),
+                    replay_version=REPLAY_VERSION,
                     replay_shift_seconds=delta.total_seconds(), weekday_alignment_preserved=delta.days % 7 == 0)
     return frozen_schedule(replace(schedule, trips=trips, start=schedule.start+delta,
                                    end=schedule.end+delta, metadata=metadata))
@@ -112,7 +173,7 @@ def validate_study(study):
     keys(study, {"schema_version", "name", "home_config", "control_config", "output_directory",
                  "home_id", "vehicle_id", "duration_hours", "horizon_hours", "control_minutes",
                  "warmup_hours", "cooldown_hours", "pair_mobility_by_seed", "initial_socs",
-                 "schedule_cases", "common_ev_controls", "configurations", "_comments"}, "EV study")
+                 "schedule_cases", "common_ev_controls", "configurations", "reuse_all_baseline", "run_non_v2h_twin", "_comments"}, "EV study")
     if study["schema_version"] != 1:
         raise ValueError("Unsupported EV study schema")
     identifier(study["name"])
@@ -128,6 +189,10 @@ def validate_study(study):
             raise ValueError(f"Study {field} must be finite and nonnegative")
     if type(study.get("pair_mobility_by_seed", False)) is not bool:
         raise ValueError("pair_mobility_by_seed must be boolean")
+    if type(study.get("reuse_all_baseline", False)) is not bool:
+        raise ValueError("reuse_all_baseline must be boolean")
+    if "run_non_v2h_twin" in study and type(study["run_non_v2h_twin"]) is not bool:
+        raise ValueError("run_non_v2h_twin must be boolean")
     keys(study["common_ev_controls"], EV_CONTROL | {"forecast", "forecast_hours"}, "common EV controls")
     for collection in ("schedule_cases", "configurations"):
         entries = study[collection]
@@ -135,14 +200,14 @@ def validate_study(study):
         if not ids or len(ids) != len(set(ids)):
             raise ValueError(f"{collection} requires unique nonempty IDs")
     for case in study["schedule_cases"]:
-        keys(case, {"id", "start_time", "mobility_seed", "home_seed"}, "schedule case")
+        keys(case, {"id", "start_time", "mobility_seed", "home_seed", "source_vehicle"}, "schedule case")
         pd.Timestamp(case["start_time"])
         for name in ("mobility_seed", "home_seed"):
             if type(case[name]) is not int or case[name] < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
     for variant in study["configurations"]:
-        keys(variant, {"id", "description", "ev_controls"}, "study configuration")
-        keys(variant["ev_controls"], EV_CONTROL, "variant EV controls")
+        keys(variant, {"id", "description", "ev_controls", "factors"}, "study configuration")
+        keys(variant["ev_controls"], EV_CONTROL | {"forecast", "forecast_hours"}, "variant EV controls")
         method = variant["ev_controls"].get("degradation_method", "none")
         if method not in METHODS | PLANNED:
             raise ValueError(f"Unknown study degradation method: {method}")
@@ -156,13 +221,22 @@ def stage_study(study_file, repo_root, *, output_directory=None, smoke=False):
     Smoke mode is separate: 15-minute warm-up + 30-minute evaluation, two configs.
     """
     root = Path(repo_root).resolve()
-    study = read_json(study_file)
+    study = expand_configurations(read_json(study_file))
     validate_study(study)
     if smoke:
         study = deepcopy(study)
         study.update(name=study["name"] + "_driver_smoke", duration_hours=.5, horizon_hours=.5, warmup_hours=.25, cooldown_hours=.25,
                      initial_socs=[.5], schedule_cases=study["schedule_cases"][:1])
         study["configurations"] = study["configurations"][:2]
+        for variant in study["configurations"]:
+            if "horizon_hours" in variant.get("factors", {}):
+                variant["factors"]["horizon_hours"] = .5  # Plot actual smoke horizons, not production labels.
+        # A diagnostic smoke horizon is shorter than the production prefix.
+        for controls in [study["common_ev_controls"], *[v["ev_controls"] for v in study["configurations"]]]:
+            controls.update(horizon_hours=.5, forecast_hours=.5)
+            if "prefix_control_intervals" in controls.get("forecast", {}):
+                controls["forecast"]["prefix_control_intervals"] = min(
+                    controls["forecast"]["prefix_control_intervals"], int(study["horizon_hours"]*60/study["control_minutes"]))
     output = resolve(root, output_directory or (study["output_directory"] + ("_driver_smoke" if smoke else "")))
     home_doc = read_json(resolve(root, study["home_config"]))
     control_doc = read_json(resolve(root, study["control_config"]))
@@ -184,12 +258,14 @@ def stage_study(study_file, repo_root, *, output_directory=None, smoke=False):
     inputs.extend(p for p in (root/"ochre/defaults").rglob("*") if p.is_file())
     hashes = {str(p): file_hash(p) for p in sorted(set(inputs))}
     fixed = {k: v for k, v in study.items() if k not in {"configurations", "_comments", "output_directory"}}
-    context = digest({"study": fixed, "home": home_doc, "control": control_doc, "input_hashes": hashes})
+    context = digest({"study": fixed, "home": home_doc, "control": control_doc,
+                      "input_hashes": hashes, "replay_version": REPLAY_VERSION})
     manifest_file = output/"manifest.json"
     manifest = read_json(manifest_file) if manifest_file.exists() else {
         "schema_version": 1, "name": study["name"], "repo_root": str(root),
         "context_sha256": context, "input_hashes": hashes, "cases": {}, "jobs": {},
-        "smoke": smoke, "staged_only": True}
+        "smoke": smoke, "staged_only": True, "replay_version": REPLAY_VERSION,
+        "reuse_all_baseline": study.get("reuse_all_baseline", False)}
     if manifest["context_sha256"] != context:
         raise ValueError("Frozen study inputs changed; use a new output directory")
     schedule_cache = {}
@@ -206,6 +282,8 @@ def stage_study(study_file, repo_root, *, output_directory=None, smoke=False):
         for soc in study["initial_socs"]:
             case_id = f"{case['id']}_soc_{str(soc).replace('.', 'p')}"
             hdoc, cdoc = deepcopy(home_doc), deepcopy(control_doc)
+            if "run_non_v2h_twin" in study:
+                cdoc["run_non_v2h_twin"] = study["run_non_v2h_twin"]
             hdoc["simulation"].update(start_time=case["start_time"], duration_hours=study["duration_hours"],
                 warmup_hours=study.get("warmup_hours", 24.0), cooldown_hours=study.get("cooldown_hours", 24.0),
                 random_seed=case["home_seed"],
@@ -213,12 +291,25 @@ def stage_study(study_file, repo_root, *, output_directory=None, smoke=False):
             entry = hdoc["homes"][home_id]["evs"][vehicle_id]
             entry["initial_soc_fraction"] = soc
             entry["mobility"].update(seed=case["mobility_seed"])
+            if "source_vehicle" in case:
+                entry["mobility"]["source_vehicle"] = case["source_vehicle"]
             common = merge(cdoc.get("defaults", {}).get("ev", {}),
                            cdoc["homes"][home_id].get("evs", {}).get(vehicle_id, {}))
+            common.update(controller="mpc", formulation="milp", forecast={"mode": "perfect"},
+                          enable_degradation=False, degradation_method="none")
             common = merge(common, study["common_ev_controls"])
-            common.update(controller="mpc", formulation="milp", horizon_hours=study["horizon_hours"],
-                          forecast_hours=study["horizon_hours"], control_minutes=study["control_minutes"],
-                          forecast={"mode": "perfect"}, enable_degradation=False, degradation_method="none")
+            common.update(horizon_hours=study["horizon_hours"], forecast_hours=study["horizon_hours"],
+                          control_minutes=study["control_minutes"])
+            # All variants share one source window with enough history for the
+            # largest kNN requirement. Selection never uses future observations.
+            history_days = entry["mobility"]["history_days"]
+            for variant in study["configurations"]:
+                c = merge(common, variant["ev_controls"])
+                if c["forecast"]["mode"] == "scenario":
+                    f = scenario_settings(c["forecast"], c["control_minutes"], c["horizon_hours"])
+                    history_days = max(history_days, f["lookback_days"] +
+                        (f["knn_history_hours"]/24 if f["scenario_method"] == "knn_state" else 0))
+            entry["mobility"]["history_days"] = history_days
             ctl = cdoc["homes"][home_id]
             ctl.update(evs={vehicle_id: common})
             for device in ("hpwh", "hvac"):
@@ -233,7 +324,8 @@ def stage_study(study_file, repo_root, *, output_directory=None, smoke=False):
                     dwelling = config.neighborhood.homes[0]
                     dwelling = replace(dwelling, evs=tuple(replace(e, hems=replace(e.hems,
                         forecast_margin_hours=2*study["horizon_hours"])) for e in dwelling.evs))
-                    schedule_cache[mobility_key] = {key: frozen_schedule(value) for key, value in
+                    schedule_cache[mobility_key] = {key: frozen_schedule(replace(value,
+                        metadata={**value.metadata, "simulation_start": str(config.simulation_window().start_time)})) for key, value in
                         build_ev_schedules(config.simulation_window(), dwelling).items()}
                 mobility = schedule_cache[mobility_key]
                 if paired_mobility:
@@ -260,14 +352,24 @@ def stage_study(study_file, repo_root, *, output_directory=None, smoke=False):
                 method = variant_doc["homes"][home_id]["evs"][vehicle_id]["degradation_method"]
                 # Validate implemented variants now; planned methods are explicitly blocked.
                 if method in METHODS:
-                    load_unified(case_dir/"home.json", job_dir/"control.json", root)
+                    resolved = load_unified(case_dir/"home.json", job_dir/"control.json", root)
+                    for key, value in read_json(case_dir/"mobility.json").items():
+                        ev = next(e for e in resolved.neighborhood.homes[0].evs if e.vehicle_id == key)
+                        runtime = resolved.simulation_window()
+                        c = resolved.controls[home_id]["evs"][key]
+                        if c["forecast"]["mode"] == "scenario" and (
+                                pd.Timestamp(value["start"]) > pd.Timestamp(runtime.start_time)-pd.Timedelta(days=ev.hems.history_days) or
+                                pd.Timestamp(value["end"]) < pd.Timestamp(runtime.start_time)+runtime.duration+pd.Timedelta(hours=2*c["forecast_hours"])):
+                            raise ValueError("Frozen mobility lacks scenario history/tail; stage a new study revision")
                 manifest["jobs"][job_id] = {"case_id": case_id, "configuration_id": variant["id"],
                     "definition_sha256": definition, "control_sha256": file_hash(job_dir/"control.json"),
                     "method": method, "availability": "ready" if method in METHODS else "pending_formulation",
+                    "factors": variant.get("factors", {}),
                     "home_id": home_id, "vehicle_id": vehicle_id}
     # Verify previous staged snapshots even when no simulation is requested.
     verify_files(output, manifest)
     write_json(manifest_file, manifest)
+    summarize(output, manifest)
     return manifest_file
 
 
@@ -288,7 +390,9 @@ def verify_files(output, manifest):
 def summarize(output, manifest):
     """Long-form paired results; failures are never treated as zero savings."""
     frames, statuses = [], []
+    combination_rows = {}
     for job_id, job in manifest["jobs"].items():
+        combination_rows[job["configuration_id"]] = dict(configuration_id=job["configuration_id"], **job.get("factors", {}))
         status_file = output/"jobs"/job_id/"status.json"
         status = read_json(status_file) if status_file.exists() else {"state": "not_run"}
         statuses.append({"job_id": job_id, **job, **status})
@@ -301,11 +405,15 @@ def summarize(output, manifest):
                 fields = [c for c in solver if c not in frame or c in {"home_id", "case", "device"}]
                 frame = frame.merge(solver[fields], on=["home_id", "case", "device"], how="left", validate="one_to_one")
             frame["configuration_id"], frame["study_case"] = job["configuration_id"], job["case_id"]
+            for key, value in job.get("factors", {}).items():
+                frame[key] = value
             frame["study_initial_soc"] = manifest["cases"][job["case_id"]]["initial_soc"]
             frame["warmup_hours"] = manifest["cases"][job["case_id"]].get("warmup_hours", 0)
             frame["cooldown_hours"] = manifest["cases"][job["case_id"]].get("cooldown_hours", 0)
             frames.append(frame)
     pd.DataFrame(statuses).to_csv(output/"study_runs.csv", index=False)
+    combinations = pd.DataFrame(combination_rows.values())
+    combinations["paired_case_count"] = 0
     if frames:
         data = pd.concat(frames, ignore_index=True)
         data.to_csv(output/"study_metrics.csv", index=False)
@@ -314,13 +422,21 @@ def summarize(output, manifest):
         coverage = {v: set(data.loc[data.configuration_id.eq(v), "study_case"]) for v in variants}
         paired = set.intersection(*coverage.values())
         values = data.loc[data.study_case.isin(paired)]
-        numeric = list(values.select_dtypes(include="number").columns)
+        numeric = [c for c in values.select_dtypes(include="number").columns if c not in combinations.columns]
         # Case is an essential grouping key: never pool advanced and non-V2H.
         aggregate = values.groupby(["configuration_id", "case", "device"])[numeric].agg(["count", "mean", "std", "min", "max"])
         aggregate.columns = ["_".join(column) for column in aggregate.columns]
         aggregate.reset_index().to_csv(output/"paired_summary.csv", index=False)
+        if not aggregate.empty:
+            # One row per combination; case/device prefixes prevent pooling twin
+            # and advanced outcomes while retaining the existing long summary.
+            wide = aggregate.unstack(["case", "device"])
+            wide.columns = [f"{case}_{device}_{metric}" for metric, case, device in wide.columns]
+            combinations = combinations.merge(wide.reset_index(), on="configuration_id", how="left", validate="one_to_one")
+        combinations["paired_case_count"] = len(paired)
         from .ev_study_plots import plot_study
         plot_study(output, manifest, statuses, values)
+    combinations.to_csv(output/"paired_metrics.csv", index=False)
     complete = sum(s["state"] == "complete" for s in statuses)
     text = (f"# EV study status\n\nCompleted {complete}/{len(statuses)} jobs.\n\n"
             "Each job retains all-baseline, non-V2H twin, and advanced data/figures. "
@@ -333,19 +449,26 @@ def summarize(output, manifest):
             "All SOC/comfort violations, unmet trips, and solver fallbacks remain in the metrics.\n\n"
             "study_runs.csv includes every job and failure. study_metrics.csv contains completed jobs only. "
             "paired_summary.csv uses only cases completed by every staged configuration; it may be empty. "
+            "paired_metrics.csv has one row per configuration combination, factor labels and paired_case_count; "
+            "case/device-prefixed metrics appear when paired results exist, never fabricated zeros. "
             "Every summary groups by configuration, case and device: advanced and non-V2H are never averaged together. "
             "Statistics include mean/std/min/max and counts; max_solve_seconds_max is the worst observed solve. "
-            "figures/ contains separate advanced/non-V2H cross-controller trajectories, paired raw/adjusted savings "
-            "and final-scenario forecast accuracy comparisons. Forecast scores include any persistence prefix; "
+            "figures/ keeps advanced/non-V2H comparisons separate. Factorial studies plot each objective "
+            "with scenario count on the x-axis and distinct selection-method lines, or bank/horizon heatmaps, "
+            "averaging only paired situations. Heatmaps label worst solve time as max and failure counts as sum; "
+            "the original formulation study retains per-situation trajectory overlays. Savings, forecast accuracy "
+            "and EV outcomes retain each configuration combination. Forecast scores include any persistence prefix; "
             "zero-scenario selections are flagged/countable, not zero-error samples. Timestep scores include only "
             "evaluation issuances/targets; horizon and next-trip metrics require complete evaluation-window horizons. "
             "Run-level forecast_errors and forecast_errors_by_lead CSVs retain per-issuance values and counts. "
-            "No cross-configuration baseline cache is used in this first driver.\n")
+            f"All-baseline reuse is {'enabled' if manifest.get('reuse_all_baseline') else 'disabled'}; "
+            "only identical baseline plant inputs/comfort targets can share a trajectory. Metrics are recomputed "
+            "for each configuration; non-V2H twins are never shared.\n")
     (output/"study_report.md").write_text(text, encoding="utf-8")
 
 
-def run_study(manifest_file, *, configuration_ids=None, case_ids=None):
-    """Execute selected jobs, resume completed ones, preserve failed attempts."""
+def run_study(manifest_file, *, configuration_ids=None, case_ids=None, progress=False):
+    """Execute/resume jobs; optional console progress leaves frozen outputs intact."""
     manifest_file = Path(manifest_file).resolve()
     output, manifest = manifest_file.parent, read_json(manifest_file)
     verify_files(output, manifest)
@@ -367,14 +490,21 @@ def run_study(manifest_file, *, configuration_ids=None, case_ids=None):
         raise ValueError("Code or solver environment changed; start a new study revision")
     manifest.update(execution_environment=runtime, staged_only=False)
     write_json(manifest_file, manifest)
-    for job_id, job in selected.items():
+    reporter = StudyProgress(len(selected)) if progress else None
+    for index, (job_id, job) in enumerate(selected.items(), 1):
+        if reporter:
+            reporter.begin(index, job_id)
         job_dir, case_dir = output/"jobs"/job_id, output/"cases"/job["case_id"]
         status_file = job_dir/"status.json"
         status = read_json(status_file) if status_file.exists() else {}
         if status.get("state") == "complete":
+            if reporter:
+                reporter.message("verifying completed output")
             for path, expected in status["output_hashes"].items():
                 if file_hash(output/path) != expected:
                     raise ValueError(f"Completed output changed: {path}")
+            if reporter:
+                reporter.message("already complete; skipped")
             continue
         attempt = int(status.get("attempt", 0)) + 1
         # OCHRE emits long equipment filenames; compact run paths avoid Windows
@@ -386,16 +516,30 @@ def run_study(manifest_file, *, configuration_ids=None, case_ids=None):
         status = {"state": "running", "attempt": attempt, "run_directory": str(run_dir.relative_to(output))}
         write_json(status_file, status)
         started = time.perf_counter()
+        if reporter:
+            reporter.message(f"starting attempt {attempt}")
         try:
-            run_unified(config, [job["home_id"]], mobility_by_home={job["home_id"]: frozen})
+            kwargs = {"progress": reporter} if reporter else {}
+            if manifest.get("reuse_all_baseline"):
+                kwargs["baseline_cache"] = dict(directory=output/"baseline_cache",
+                    scope=digest({"context": manifest["context_sha256"], "environment": runtime}))
+            run_unified(config, [job["home_id"]], mobility_by_home={job["home_id"]: frozen}, **kwargs)
             status.update(state="complete", elapsed_seconds=time.perf_counter()-started,
                           output_hashes={str(p.relative_to(output)): file_hash(p) for p in run_dir.rglob("*") if p.is_file()})
         except Exception as error:
             status.update(state="failed", elapsed_seconds=time.perf_counter()-started,
                           error=f"{type(error).__name__}: {error}")
             write_json(status_file, status)
+            if reporter:
+                reporter.message(f"FAILED: {status['error']}")
             summarize(output, manifest)
             raise
         write_json(status_file, status)
+        if reporter:
+            reporter.message(f"complete in {status['elapsed_seconds']/60:.1f} min")
+    if reporter:
+        reporter.message("building paired reports and plots")
     summarize(output, manifest)
+    if reporter:
+        reporter.message("selected jobs complete; reports saved")
     return output

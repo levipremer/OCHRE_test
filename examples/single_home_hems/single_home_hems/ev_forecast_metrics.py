@@ -8,22 +8,33 @@ import numpy as np
 import pandas as pd
 
 
-STEP_METRICS = ("brier_home", "false_home", "false_away", "arrival_energy_mae_kwh")
+STEP_METRICS = ("brier_home", "false_home", "false_away", "arrival_energy_mae_kwh", "departure_energy_mae_kwh")
 HORIZON_METRICS = ("horizon_energy_mae_kwh", "energy_coverage", "energy_sharpness_kwh",
                    "next_trip_energy_mae_kwh", "next_trip_missing_fraction",
-                   "next_trip_false_prediction_fraction")
+                   "next_trip_false_prediction_fraction", "departure_horizon_energy_mae_kwh",
+                   "departure_energy_coverage", "departure_energy_sharpness_kwh")
 
 
-def _energy(path, left, right, consumption):
-    arrivals = path.trips
-    return float(arrivals.loc[(arrivals.arrival >= left) &
-                             (arrivals.arrival < right), "distance_km"].sum()) * consumption
+def _energy(path, left, right, consumption, event="arrival"):
+    trips = path.trips
+    return float(trips.loc[(trips[event] >= left) &
+                          (trips[event] < right), "distance_km"].sum()) * consumption
 
 
 def _next_trip(path, left, right, consumption):
     # Ignore the ongoing trip when issuance occurs away; zero-distance trips count.
-    trips = path.trips.loc[(path.trips.departure >= left) & (path.trips.arrival < right)]
+    trips = path.trips.loc[(path.trips.departure >= left) & (path.trips.departure < right)]
     return float(trips.iloc[0].distance_km) * consumption if len(trips) else np.nan
+
+
+def _energy_bins(path, edges, consumption, event="arrival"):
+    """Event energy in half-open bins; retain arrival scores for old studies."""
+    events = pd.DatetimeIndex(path.trips[event])
+    bins = edges.searchsorted(events, side="right") - 1
+    valid = (bins >= 0) & (bins < len(edges)-1)
+    distance = np.zeros(len(edges)-1)
+    np.add.at(distance, bins[valid], path.trips.distance_km.to_numpy()[valid])
+    return distance * consumption
 
 
 def score_forecasts(issued, actual, consumption, control_minutes, start, end):
@@ -51,12 +62,21 @@ Absent ensembles are flagged, never treated as accurate forecasts.
         row.update({name: np.nan for name in (*STEP_METRICS, *HORIZON_METRICS)})
         local = []
         if paths:
-            for target in pd.date_range(timestamp, stop, freq=step, inclusive="left"):
+            targets = pd.date_range(timestamp, stop, freq=step, inclusive="left")
+            edges = targets.append(pd.DatetimeIndex([stop]))
+            # Query each path once per issuance, not once per target/scenario.
+            truth_all = actual.available(targets)
+            home_all = np.array([p.available(targets) for p in paths], dtype=float)
+            energy_all = _energy_bins(actual, edges, consumption)
+            predicted_all = np.array([_energy_bins(p, edges, consumption) for p in paths])
+            departure_all = _energy_bins(actual, edges, consumption, "departure")
+            predicted_departures = np.array([_energy_bins(p, edges, consumption, "departure") for p in paths])
+            for i, target in enumerate(targets):
                 right = min(target + step, stop)
-                truth = bool(actual.available([target])[0])
-                home = np.array([p.available([target])[0] for p in paths], dtype=float)
-                energy = _energy(actual, target, right, consumption)
-                predicted = np.array([_energy(p, target, right, consumption) for p in paths])
+                truth = bool(truth_all[i])
+                home = home_all[:, i]
+                energy = energy_all[i]
+                predicted = predicted_all[:, i]
                 detail = dict(timestamp=timestamp, target_time=target,
                     lead_minutes=(target-timestamp).total_seconds()/60,
                     duration_hours=(right-target).total_seconds()/3600, scenario_count=len(paths),
@@ -65,7 +85,10 @@ Absent ensembles are flagged, never treated as accurate forecasts.
                     brier_home=float((home.mean()-truth)**2),
                     false_home=float(np.mean((home == 1) & ~np.bool_(truth))),
                     false_away=float(np.mean((home == 0) & np.bool_(truth))),
-                    arrival_energy_mae_kwh=float(np.mean(np.abs(predicted-energy))))
+                    arrival_energy_mae_kwh=float(np.mean(np.abs(predicted-energy))),
+                    actual_departure_energy_kwh=departure_all[i],
+                    predicted_departure_energy_mean_kwh=float(predicted_departures[:, i].mean()),
+                    departure_energy_mae_kwh=float(np.mean(np.abs(predicted_departures[:, i]-departure_all[i]))))
                 local.append(detail)
             leads.extend(local)
             weights = [d["duration_hours"] for d in local]
@@ -77,10 +100,15 @@ Absent ensembles are flagged, never treated as accurate forecasts.
                 next_actual = _next_trip(actual, timestamp, finish, consumption)
                 next_pred = np.array([_next_trip(p, timestamp, finish, consumption) for p in paths])
                 observed = bool(np.isfinite(next_actual))
+                departure_energy = _energy(actual, timestamp, finish, consumption, "departure")
+                departure_prediction = np.array([_energy(p, timestamp, finish, consumption, "departure") for p in paths])
                 row.update(actual_horizon_energy_kwh=energy,
                     horizon_energy_mae_kwh=float(np.mean(np.abs(predicted-energy))),
                     energy_coverage=float(predicted.min() <= energy <= predicted.max()),
                     energy_sharpness_kwh=float(np.ptp(predicted)), next_trip_observed=observed,
+                    departure_horizon_energy_mae_kwh=float(np.mean(np.abs(departure_prediction-departure_energy))),
+                    departure_energy_coverage=float(departure_prediction.min() <= departure_energy <= departure_prediction.max()),
+                    departure_energy_sharpness_kwh=float(np.ptp(departure_prediction)),
                     next_trip_energy_mae_kwh=float(np.mean(np.abs(np.nan_to_num(next_pred)-next_actual))) if observed else np.nan,
                     next_trip_missing_fraction=float(np.mean(np.isnan(next_pred))) if observed else np.nan,
                     next_trip_false_prediction_fraction=float(np.mean(np.isfinite(next_pred))) if not observed else np.nan)
@@ -90,7 +118,8 @@ Absent ensembles are flagged, never treated as accurate forecasts.
         *STEP_METRICS, *HORIZON_METRICS, "actual_horizon_energy_kwh"])
     details = pd.DataFrame(leads, columns=["timestamp", "target_time", "lead_minutes",
         "duration_hours", "scenario_count", "actual_home", "predicted_home_probability",
-        "actual_arrival_energy_kwh", "predicted_arrival_energy_mean_kwh", *STEP_METRICS])
+        "actual_arrival_energy_kwh", "predicted_arrival_energy_mean_kwh",
+        "actual_departure_energy_kwh", "predicted_departure_energy_mean_kwh", *STEP_METRICS])
     summary = dict(forecast_issuance_count=len(issuance),
         forecast_no_scenarios_count=int(issuance.no_scenarios_selected.sum()),
         forecast_no_scenarios_fraction=float(issuance.no_scenarios_selected.mean()) if len(issuance) else np.nan,

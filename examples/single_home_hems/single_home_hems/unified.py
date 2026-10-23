@@ -1,4 +1,4 @@
-"""One three-case HEMS pipeline. No independent EV simulation loop."""
+"""Unified baseline/advanced pipeline with an optional non-V2H twin."""
 from dataclasses import asdict, dataclass, fields, replace
 import json
 from pathlib import Path
@@ -83,7 +83,7 @@ def make_controllers(home, controls, root, baseline=False):
 
 @dataclass
 class UnifiedResult:
-    """Three case trajectories plus evaluation-only metrics and solver summaries."""
+    """Selected case trajectories plus evaluation-only metrics and solver summaries."""
     cases: dict
     metrics: pd.DataFrame
     solver_stats: pd.DataFrame
@@ -161,6 +161,12 @@ def _save_case(sim, result, case, controller, original_end):
             max_relative_mip_gap=float(scored.relative_mip_gap.max()) if "relative_mip_gap" in scored else np.nan,
             max_mip_absolute_gap=float((scored.backend_primal_bound-scored.dual_bound).clip(lower=0).max())
                 if {"backend_primal_bound", "dual_bound"} <= set(scored) else np.nan,
+            mean_predicted_trip_shortfall_kwh=float(scored.predicted_trip_shortfall_kwh_mean.mean())
+                if "predicted_trip_shortfall_kwh_mean" in scored else np.nan,
+            max_predicted_trip_shortfall_kwh=float(scored.predicted_trip_shortfall_kwh_max.max())
+                if "predicted_trip_shortfall_kwh_max" in scored else np.nan,
+            solves_with_predicted_trip_shortfall=int((scored.predicted_trip_shortfall_kwh_max > 1e-7).sum())
+                if "predicted_trip_shortfall_kwh_max" in scored else 0,
             rainflow_uncertified=int((~scored.rainflow_converged.dropna().astype(bool)).sum()) if "rainflow_converged" in scored else 0,
             solver=getattr(device, "solver", getattr(getattr(device, "options", None), "solver", "none"))))
         if isinstance(device, EVMPCController):
@@ -180,12 +186,13 @@ def _save_case(sim, result, case, controller, original_end):
                 commands=commands, water_training=water_training), stats, histories
 
 
-def run_home(unified, home, mobility=None):
-    """Run matched baseline, no-V2H twin and advanced cases for one home."""
+def run_home(unified, home, mobility=None, *, baseline_cache=None, progress=None):
+    """Run baseline/advanced and optional twin; extend the chosen load reference."""
     config = unified.neighborhood
     run_config = unified.simulation_window()
     control = unified.controls[home.home_id]
     settings = unified.home_settings[home.home_id]
+    reference_case = unified.backed_load_reference_case
     root = config.output_directory / home.home_id
     original_start = pd.Timestamp(config.start_time)
     original_end = original_start+config.duration
@@ -228,12 +235,21 @@ def run_home(unified, home, mobility=None):
     water_scenario = control["hpwh"]["controller"] == "mpc" and control["hpwh"]["forecast"]["mode"] == "scenario"
     if water_scenario and pd.Timestamp(run_config.start_time) != pd.Timestamp(run_config.start_time).floor("15min"):
         raise ValueError("HPWH scenario starts must align with local quarter hours")
-    for case in CASES:
+    for case in unified.case_names:
+        def case_progress(**event):
+            if progress:
+                progress(home_id=home.home_id, case=case, **event)
+
+        callback = case_progress if progress else None
+        case_progress(phase="initializing")
         selected_home = home if case == "advanced" else twin_home
         devices, providers = make_controllers(selected_home, control, config.repo_root, baseline=case == "all_baseline")
+        for provider in providers.values():
+            if isinstance(provider, ScenarioEVForecast):
+                provider.backed_load_source = f"shared {reference_case} trajectory"
         controller = HEMSController(device_controllers=devices)
         case_config = replace(run_config, homes=(selected_home,), output_directory=root/case,
-            duration=run_config.duration+extension if case == "non_v2h_twin" else run_config.duration)
+            duration=run_config.duration+extension if case == reference_case else run_config.duration)
         water_file = settings.get("water_draw_file")
         if water_scenario and not water_file:
             water_file = "examples/single_home_hems/external_data/water_flow_dchouse_l_per_min.csv"
@@ -249,8 +265,13 @@ def run_home(unified, home, mobility=None):
             save_optimizer_plan_figures=settings.get("save_optimizer_plan_figures", False), ev_mobility_schedules=mobility, ev_backed_load=backed,
             unified_context={"forecast_extension": extension, "cooldown_end": cooldown_end,
                              "backed_loads": settings["backed_loads"], "providers": providers})
-        result = sim._run_stepwise(apply_controls=True, raw_directory=sim.raw_directory)
-        if case == "non_v2h_twin":
+        if case == "all_baseline" and baseline_cache is not None:
+            from .baseline_cache import baseline_result
+            result = baseline_result(sim, baseline_cache, progress=callback)
+        else:
+            result = sim._run_stepwise(apply_controls=True, raw_directory=sim.raw_directory, progress=callback)
+        case_progress(phase="scoring and plotting")
+        if case == reference_case:
             backed = pd.Series(backed_power(result[0], settings["backed_loads"]), index=result[0].index)
         # No plant/controller reset at evaluation start. Preserve its boundary state.
         preceding = result[0].loc[result[0].index < original_start]
@@ -333,7 +354,7 @@ def run_home(unified, home, mobility=None):
     pd.concat(histories, ignore_index=True).to_csv(directory/"solve_history.csv", index=False) if histories else (directory/"solve_history.csv").write_text("timestamp,home_id,case,device,status,successful,solve_seconds\n", encoding="utf-8")
     comparison = baseline_economics(pd.DataFrame(metrics))
     comparison.to_csv(directory/"comparison.csv", index=False)
-    for case in CASES:
+    for case in cases:
         ev_rows = comparison.loc[comparison.case.eq(case) & comparison.device.str.startswith("EV_")]
         ev_rows.to_csv(root/case/"data/ev_metrics.csv", index=False)
     from .unified_plots import plot_cases
@@ -386,7 +407,7 @@ def baseline_economics(metrics):
     return result
 
 
-def run_unified(unified, home_ids=None, *, mobility_by_home=None):
+def run_unified(unified, home_ids=None, *, mobility_by_home=None, baseline_cache=None, progress=None):
     """Run the normal pipeline, optionally replaying study-frozen EV schedules."""
     config = unified.neighborhood
     selected = [h for h in config.homes if home_ids is None or h.home_id in home_ids]
@@ -400,7 +421,8 @@ def run_unified(unified, home_ids=None, *, mobility_by_home=None):
     save_configuration(unified, selected)
     if mobility_by_home is not None and set(mobility_by_home) != {h.home_id for h in selected}:
         raise ValueError("Frozen mobility must cover exactly the selected homes")
-    results = {h.home_id: run_home(unified, h, None if mobility_by_home is None else mobility_by_home[h.home_id])
+    results = {h.home_id: run_home(unified, h, None if mobility_by_home is None else mobility_by_home[h.home_id],
+                                 baseline_cache=baseline_cache, progress=progress)
                for h in selected}
     write_reports(config, results)
     return results
@@ -413,6 +435,7 @@ def save_configuration(unified, selected):
     config.output_directory.mkdir(parents=True, exist_ok=True)
     (config.output_directory/"resolved_configuration.json").write_text(json.dumps({
         "home_document": unified.home_document, "control_document": unified.control_document,
+        "ev_trip_energy_timing": "departure", "ev_trip_cost_aggregation": "trip_mean_then_scenario_max",
         "resolved_controls": unified.controls, "home_settings": unified.home_settings,
         "selected_homes": [h.home_id for h in selected], "runtime": asdict(config),
         "evaluation_window": {"start": config.start_time, "end_exclusive": config.start_time+config.duration,
@@ -420,7 +443,8 @@ def save_configuration(unified, selected):
             "cooldown_hours": unified.cooldown_hours,
             "simulation_end_exclusive": run_config.start_time+run_config.duration,
             "initial_soc_applies_at": "simulation_start"},
-        "cases": list(CASES), "initialization": "measured initial states; repeated measured HPWH lifted history"},
+        "cases": list(unified.case_names), "backed_load_reference_case": unified.backed_load_reference_case,
+        "initialization": "measured initial states; repeated measured HPWH lifted history"},
         default=str, indent=2), encoding="utf-8")
 
 
@@ -432,7 +456,7 @@ def write_reports(config, results):
     stats.to_csv(directory/"solver_stats.csv", index=False)
     pd.concat([pd.read_csv(r.data_directory/"solve_history.csv") for r in results.values()], ignore_index=True).to_csv(directory/"solve_history.csv", index=False)
     pd.concat([r.metrics for r in results.values()], ignore_index=True).to_csv(directory/"comparison.csv", index=False)
-    for case in CASES:
+    for case in next(iter(results.values())).cases:
         powers = pd.DataFrame({key: r.cases[case]["mapped"].total_electric_power_kw for key, r in results.items()})
         powers["whole_neighborhood_kw"] = powers.sum(axis=1)
         powers.to_csv(directory/f"{case}_aggregate.csv")
@@ -441,8 +465,9 @@ def write_reports(config, results):
     metrics = pd.concat([r.metrics for r in results.values()], ignore_index=True)
     metrics.to_csv(directory/"performance.csv", index=False)
     lines = ["# Unified HEMS run report", "",
-        "All-baseline, non-V2H twin, and advanced results use the same comparison window. "
-        "Comparison metrics and plots exclude controller-active warm-up, cooldown and the twin forecast tail; "
+        "Cases: " + ", ".join(next(iter(results.values())).cases) + ". "
+        "Backed-load reference: " + ("non_v2h_twin" if "non_v2h_twin" in next(iter(results.values())).cases else "all_baseline") + ". "
+        "Comparison metrics and plots exclude controller-active warm-up, cooldown and the reference forecast tail; "
         "native raw outputs and detailed histories retain them. See resolved_configuration.json and evaluation_mask.csv. "
         "States and controller memory are not reset at evaluation start. EV aging metrics sum scored continuous-ledger "
         "increments, retaining prior cycle residue but excluding warm-up/cooldown increments. "
@@ -461,8 +486,10 @@ def write_reports(config, results):
         "Comfort metrics are realized degree-hours, not weighted OCP costs: HPWH uses "
         "average tank temperature below the reported reference; HVAC uses configured thermostat setpoints. "
         "EV health/comfort violations are SOC-fraction-hours. Compare final stored energy before claiming savings. "
-        "EV baseline charges to comfort minimum. Full forecast trips can make the hard-bounded OCP infeasible; "
-        "baseline fallback is logged. Plant clipping and unserved trip energy are reported separately.", "",
+        "EV baseline charges to comfort minimum. Trip demand is debited at departure; comfort uses pre-debit SOC. "
+        "Bounded unmet-energy slack is capacity-normalized and averaged over new forecast trips. "
+        "Scenario MPC takes separate worst-path comfort and trip costs. Away actuation is blocked in the plant. "
+        "Plant clipping, unserved trip energy and baseline fallback are reported separately.", "",
         "Solve-call timing includes canonicalization/backend overhead; OCP timing also includes preparation. "
         "Per-timestep averages divide total comparison-window time (including failed attempts) by plant steps. "
         "EV rainflow iterations share one 300 s elapsed-time budget, with remaining time passed to each backend. "
@@ -480,7 +507,8 @@ def write_reports(config, results):
         "and residue half cycles. NMC reference aging uses additive fade and signed SOC stress, not early-life "
         "nonlinear accumulation or measured true aging. The same battery calibration is used in all cases.", "",
         "EV scenario errors score the final issued forecast, including any persistence prefix. "
-        "Availability is sampled at control-bin starts; arrival demand is distance-derived chemical kWh "
+        "Availability is sampled at control-bin starts; departure demand is distance-derived chemical kWh "
+        "(legacy arrival-based scores are also retained under their existing names). Demand is "
         "integrated in each bin, not served energy. Timestep means are duration-weighted over scored "
         "issuance/target pairs; overlapping forecasts intentionally retain distinct lead predictions. "
         "Horizon/next-new-trip scores require a complete horizon inside evaluation. No-scenario "

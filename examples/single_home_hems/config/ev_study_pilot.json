@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "run_non_v2h_twin": false,
   "name": "audi_janfeb_cost_formulations",
   "home_config": "examples/single_home_hems/config/unified_home.json",
   "control_config": "examples/single_home_hems/config/unified_control.json",

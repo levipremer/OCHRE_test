@@ -1,9 +1,13 @@
 # Unified single-home HEMS
 
-One OCHRE-backed runner compares **all-baseline**, **non-V2H twin**, and
-**advanced** control for each selected home. EV and HPWH support independent
+One OCHRE-backed runner compares **all-baseline** and **advanced**, with an optional
+**non-V2H twin**, for each selected home. EV and HPWH support independent
 baseline/MPC choices; HVAC remains native/pass-through. Multiple homes are
 independent simulations, not a coordinated neighborhood OCP.
+
+Set top-level `"run_non_v2h_twin": false` in the control JSON (or study JSON)
+to omit the twin and use baseline backed-load forecasts. Supplied configs/templates
+set `false`; omission retains the backward-compatible `true` behavior.
 
 ## Install and run
 
@@ -26,8 +30,8 @@ before running: home overrides can enable MPC even when defaults say baseline.
 - **CLARABEL:** convex problems; **SCIPY:** MILP through HiGHS.
 - **GUROBI:** optional (`python -m pip install gurobipy`), with a suitable license.
   Package installation alone does not provide an unrestricted academic license.
-  The October 17 local large-scenario check failed with restricted-license error
-  10010; the pipeline does not silently switch solvers.
+  Point `GRB_LICENSE_FILE` at your valid license if automatic discovery selects
+  an obsolete/restricted one; the pipeline does not silently switch solvers.
 - Templates use valid JSON `_comments` metadata rather than JSON comments:
   [home](config/unified_home.template.json), [control](config/unified_control.template.json).
 
@@ -40,10 +44,10 @@ before running: home overrides can enable MPC even when defaults say baseline.
 | [EV scenarios](docs/scenarios.md) | Historical sampling, persistence prefix and scenario objective |
 | [EV studies](docs/studies.md) | Stage, run, resume and compare paired experiments |
 | [Extension map](docs/extending.md) | Module responsibilities and safe extension points |
-| [Validation](docs/validation/README.md) | Commands, dated results and known failures |
+| [Validation](docs/validation/README.md) | Commands, recent checks and known failures |
 
 Start with `run_ev_study.py` **without** `--run` to stage a study only.
-`--smoke-test` executes a small three-case validation; `--run` executes selected
+`--smoke-test` executes a small validation with the configured cases; `--run` executes selected
 jobs (all jobs if unfiltered). See the study guide before resuming frozen inputs.
 
 Legacy HPWH CLI entry points remain compatibility interfaces. The EV overlay

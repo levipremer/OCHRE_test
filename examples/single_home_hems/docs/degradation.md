@@ -1,6 +1,6 @@
 # EV health, comfort and degradation
 
-October 16 dynamic-SOH revision. Use the unified runner and the two documented JSON templates.
+Current implementation. Use the unified runner and the two documented JSON templates.
 Single-path OCP equations and EV controllers are in `single_home_hems/controllers/ev.py`;
 `controllers/ev_scenario.py` assembles scenario problems and their joint cut loop.
 `five_home_block/ev_degradation.py` is the shared numerical cycle counter/calibration,
@@ -30,16 +30,20 @@ terminal objective is:
 ```
 H_low     = sum_j dt_j * max(health_soc_min - x_j, 0) / N
 H_high    = sum_j dt_j * max(x_j - health_soc_max, 0) / N
-H_comfort = sum_{j in D} max(comfort_soc_min - x_j, 0) / |D|   (0 if D is empty)
+H_comfort = sum_j dt_j * max(comfort_soc_min - x_j, 0) / N
 J_added   = health_weight * [health_soc_weight*(H_low + H_high) + C_age/N]
             + comfort_weight*H_comfort
 ```
 
-D indexes exact pre-departure states in [solve time, horizon end). Comfort applies
-only at departure, without dt/N scaling; health still applies throughout.
-A departure at the horizon end enters the next solve. Hard [0,1] OCP
-bounds and full arrival-distance driving demand remain. Infeasible trips cause
-baseline fallback, not a new slack. Only the simulated plant saturates SOC.
+Comfort and health apply throughout the horizon, including while away. With
+departure energy impulses, this soft reserve can encourage charging above the
+comfort floor before a trip to retain that floor afterward. Departure-comfort
+metrics remain separate, based on pre-debit SOC. Hard [0,1] OCP
+bounds and full distance-derived driving demand remain. Bounded unmet-energy
+slack permits unreachable forecast trips; its capacity-normalized cost is averaged
+over new trips and maximized across scenarios. Only the plant saturates SOC.
+The plant and OCP debit driving energy at departure. Departure-comfort metrics use
+the state before that impulse; rainflow includes both sides to retain charging peaks.
 
 Persistence retains dt_j/N scaling. Convex uses absolute changes in chemical
 power; MILP uses the L1 change of the one-hot (charge, discharge, idle) vector,
@@ -181,8 +185,8 @@ report includes total/max master solves, uncertified attempts, and mean/max timi
 
 ## Realized evaluation and economics
 
-All three cases use the same battery parameters and actual, bounded SOC path,
-including pre/post charging and arrival states so adjacent charging/trips cannot
+All selected cases use the same battery parameters and actual, bounded SOC path,
+including pre/post charging and departure states so adjacent charging/trips cannot
 hide extrema. Unserved driving energy is not invented as battery throughput.
 Metrics are computed even when the OCP degradation term is disabled:
 
@@ -193,7 +197,7 @@ Metrics are computed even when the OCP degradation term is disabled:
   residual/depreciable values and reference cycle life are also retained.
 - Departure count, shortfall events, and mean/max pre-departure SOC shortfall
   are reported separately. Existing SOC-fraction-hour comfort columns remain
-  whole-window diagnostics, not the departure-only OCP cost. Warm-up/cooldown
+  whole-window diagnostics; the OCP separately normalizes by N. Warm-up/cooldown
   departures are excluded. Calibration cycles/SOH and economic SOH are explicit
   alongside the effective economic reference cycle life.
 - `operating_cost_savings_usd = all_baseline electricity cost - case electricity cost`.
@@ -260,7 +264,9 @@ and `enable_degradation=false`. Objective choice never changes physical aging.
 Each action first updates SOC using start-of-action capacity, then applies fade
 while preserving that SOC. Lost accessible energy is separately recorded as
 `SOC_end * (C_before - C_after)`; it is not another degradation dollar charge.
-Trip-arrival energy is applied before exposing fresh SOC/SOH to the controller.
+Trip-departure energy is applied before exposing fresh SOC/SOH to the controller;
+pre-departure SOC is exposed separately for departure-comfort metrics. An ongoing trip is already
+paid in measured initial SOC and is never debited again at arrival.
 Repeated OCHRE model evaluations preview aging; only the accepted plant step commits it.
 
 The streaming ledger keeps closed-cycle damage and open residue half cycles.

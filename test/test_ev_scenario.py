@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import cvxpy as cp
 import numpy as np
 import pandas as pd
@@ -14,7 +15,7 @@ import pandas as pd
 from test.test_ev_v2h import ROOT, CONFIG, vehicle, schedule, forecast
 from examples.single_home_hems.single_home_hems.control_config import resolve_control, load_unified
 from examples.single_home_hems.single_home_hems.control_config import UnifiedConfiguration
-from examples.single_home_hems.single_home_hems.unified import run_home, CASES
+from examples.single_home_hems.single_home_hems.unified import run_home, run_unified, CASES
 from examples.single_home_hems.single_home_hems.control_forecasts import EVScenarioSet
 from examples.single_home_hems.single_home_hems.ev_scenarios import (
     ScenarioEVForecast, NoEVScenarios, persistent_prefix, FILTERS)
@@ -65,7 +66,9 @@ class EVScenarioForecastTests(unittest.TestCase):
         repeat = provider.at(now, f, pd.Timedelta(hours=1))
         self.assertEqual(paths.candidate_ids, repeat.candidate_ids)
         for p in paths.paths:
-            self.assertTrue(p.available(pd.date_range(now, periods=60, freq="min")).all())
+            self.assertTrue(p.available([now])[0])
+        self.assertEqual(paths.diagnostics["prefix_applied_count"],
+                         sum(p.metadata["prefix_applied"] for p in paths.paths))
 
     def test_all_filter_methods_and_future_data_independence(self):
         for method in FILTERS:
@@ -115,32 +118,58 @@ class EVScenarioForecastTests(unittest.TestCase):
         self.assertEqual(paths.diagnostics["forecast_hours"], 2)
         self.assertTrue(all(b-a >= pd.Timedelta(hours=2) for a, b in zip(origins, origins[1:])))
 
-    def test_persistence_home_delays_and_compounds(self):
-        m = schedule([(5, 10, 2), (15, 20, 3), (40, 50, 7)])
+    def test_persistence_home_discards_enclosed_trips_without_compounding(self):
+        m = schedule([(-5, 10, 2), (15, 20, 3), (40, 50, 7)])
         p = persistent_prefix(m, m.start, pd.Timedelta(hours=1), pd.Timedelta(minutes=30), True, pd.Timedelta(minutes=1))
-        self.assertEqual(p.trips.distance_km.tolist(), [12])
+        self.assertEqual(p.trips.distance_km.tolist(), [7])
         self.assertEqual(p.trips.arrival.tolist(), [m.start+pd.Timedelta(minutes=50)])
         self.assertTrue(p.available([m.start+pd.Timedelta(minutes=29)])[0])
-        self.assertEqual(p.metadata["overwritten_distance_km"], 5)
+        self.assertEqual(p.metadata["ignored_distance_km"], 5)
 
     def test_persistence_away_spans_gap_without_inventing_departure(self):
-        m = schedule([(-5, 10, 2), (40, 50, 7)])
+        m = schedule([(5, 10, 2), (40, 50, 7)])
         p = persistent_prefix(m, m.start, pd.Timedelta(hours=1), pd.Timedelta(minutes=30), False, pd.Timedelta(minutes=1))
-        self.assertEqual(p.trips.distance_km.tolist(), [9])
+        self.assertEqual(p.trips.distance_km.tolist(), [0, 7])
         self.assertLess(p.trips.departure.iloc[0], m.start)
-        self.assertFalse(p.available([m.start+pd.Timedelta(minutes=35)])[0])
+        self.assertTrue(p.available([m.start+pd.Timedelta(minutes=35)])[0])
         self.assertTrue(p.available([m.start+pd.Timedelta(minutes=50)])[0])
 
     def test_boundary_and_beyond_horizon_demand_not_lost(self):
         for home in (False, True):
-            m = schedule([(5, 30, 4)])
+            m = schedule([(-5 if home else 5, 30, 4)])
             p = persistent_prefix(m, m.start, pd.Timedelta(hours=1), pd.Timedelta(minutes=30), home, pd.Timedelta(minutes=1))
-            self.assertEqual(p.metadata["deferred_distance_km"], 4)
-            self.assertEqual(p.available([m.start+pd.Timedelta(minutes=59)])[0], home)
-        m = schedule([(5, 40, 4)])
+            self.assertEqual(p.metadata["ignored_distance_km"], 4)
+            self.assertTrue(p.available([m.start+pd.Timedelta(minutes=59)])[0])
+        m = schedule([(-5, 40, 4)])
         p = persistent_prefix(m, m.start, pd.Timedelta(hours=1), pd.Timedelta(minutes=30), True, pd.Timedelta(minutes=1))
         self.assertEqual(p.trips.departure.iloc[0], m.start+pd.Timedelta(minutes=30))
         self.assertEqual(p.trips.distance_km.sum(), 4)
+
+    def test_matching_state_preserves_near_term_transitions_and_trip_energy(self):
+        for home, trips in ((True, [(5, 10, 2), (15, 40, 7)]),
+                            (False, [(-5, 10, 2), (15, 40, 7)])):
+            with self.subTest(home=home):
+                m = schedule(trips)
+                p = persistent_prefix(m, m.start, pd.Timedelta(hours=1),
+                                      pd.Timedelta(minutes=30), home, pd.Timedelta(minutes=1))
+                pd.testing.assert_frame_equal(p.trips, m.trips)
+                self.assertFalse(p.metadata["prefix_applied"])
+                self.assertEqual(p.metadata["ignored_distance_km"], 0)
+                ev = vehicle()
+                _, plan = EVMPCController(ev).build_problem(m.start, .5, forecast(ev, p))
+                # Initial away trip has already been debited in measured SOC.
+                self.assertAlmostEqual(plan["horizon"].trip_kwh.sum(), (9 if home else 7)*.2)
+
+    def test_mismatched_zero_prefix_anchors_only_first_plant_step(self):
+        for home, trips in ((True, [(-5, 40, 7)]), (False, [(5, 40, 7)])):
+            m = schedule(trips)
+            p = persistent_prefix(m, m.start, pd.Timedelta(hours=1), pd.Timedelta(0),
+                                  home, pd.Timedelta(minutes=1))
+            self.assertTrue(p.metadata["prefix_applied"])
+            self.assertEqual(bool(p.available([m.start])[0]), home)
+            ev = vehicle()
+            _, plan = EVMPCController(ev).build_problem(m.start, .5, forecast(ev, p))
+            self.assertAlmostEqual(plan["horizon"].trip_kwh.sum(), 1.4)
 
     def test_config_reserves_audi_pool_before_replay(self):
         directory = ROOT/"examples/single_home_hems/config"
@@ -182,6 +211,36 @@ class EVScenarioForecastTests(unittest.TestCase):
 
 
 class EVScenarioOptimizerTests(unittest.TestCase):
+    def test_scenario_solve_caps_backend_at_five_minutes(self):
+        # The whole ensemble shares one solve, not 300 seconds per scenario.
+        for solver, kind, key in (("SCIPY", "milp", "scipy_options"),
+                                  ("CLARABEL", "convex", "time_limit"),
+                                  ("GUROBI", "milp", "TimeLimit")):
+            with self.subTest(solver=solver), patch.object(cp, "installed_solvers", return_value=[solver]):
+                c = EVMPCController(vehicle(solver=solver, formulation=kind))
+                paths = ensemble(c.ev)
+                f = replace(paths.forecasts[0], providers={c.equipment_name: SimpleNamespace(at=lambda *args: paths)})
+                with patch.object(cp.Problem, "solve", side_effect=cp.error.SolverError("budget test")) as call:
+                    c._solve(paths.issued_at, .5, f)
+                limit = call.call_args.kwargs[key]
+                if solver == "SCIPY":
+                    limit = limit["time_limit"]
+                self.assertGreater(limit, 0)
+                self.assertLessEqual(limit, 300)
+                self.assertEqual(call.call_count, 1)
+                self.assertTrue(c.fallback)
+
+    def test_expired_scenario_rainflow_budget_starts_no_backend(self):
+        from examples.single_home_hems.single_home_hems.controllers.ev_scenario import solve_rainflow
+        c = EVMPCController(vehicle(enable_degradation=True, degradation_method="rainflow"))
+        paths = ensemble(c.ev)
+        problem, plan = c.build_problem(paths.issued_at, .5, paths)
+        with patch.object(cp.Problem, "solve") as call:
+            result, accepted = solve_rainflow(c, problem, plan, {}, deadline=0)
+        call.assert_not_called()
+        self.assertFalse(accepted)
+        self.assertTrue(result.hems_diagnostic["timed_out"])
+
     def test_one_scenario_equivalence_and_first_command_sharing(self):
         for kind, solver in (("convex", "CLARABEL"), ("milp", "SCIPY")):
             ev = vehicle(formulation=kind, solver=solver, comfort_weight=1000,
@@ -200,7 +259,7 @@ class EVScenarioOptimizerTests(unittest.TestCase):
             a, b = plan["scenario_plans"]
             self.assertAlmostEqual(a["chemical"].value[0], b["chemical"].value[0], places=6)
 
-    def test_aggregation_max_total_comfort_and_mean_every_other_term(self):
+    def test_aggregation_separate_max_comfort_and_trip_mean_other_terms(self):
         c = EVMPCController(vehicle(comfort_weight=1000, health_soc_weight=100,
                                    persistence_weight=1, enforce_terminal_soc=True))
         paths = ensemble(c.ev, trips=(((15, 25, 2), (45, 55, 2)), ((30, 40, 3),)))
@@ -208,9 +267,11 @@ class EVScenarioOptimizerTests(unittest.TestCase):
         for i, p in enumerate(plan["scenario_plans"]):
             p["state"].value = np.full(len(p["boundaries"]), .1+i*.2)
             p["chemical"].value = np.ones(len(p["horizon"].dt))*(i+1)
+            if p["trip_shortfall_variable"] is not None:
+                p["trip_shortfall_variable"].value = np.full(len(p["trip_departure_blocks"]), i*.1)
         for key, total in plan["objective_terms"].items():
             values = [p["objective_terms"][key].value for p in plan["scenario_plans"]]
-            self.assertAlmostEqual(total.value, max(values) if key == "comfort" else np.mean(values))
+            self.assertAlmostEqual(total.value, max(values) if key in {"comfort", "trip_shortfall"} else np.mean(values))
 
     def test_rainflow_joint_solve_certifies_each_path(self):
         for kind, solver in (("convex", "CLARABEL"), ("milp", "SCIPY")):
@@ -246,12 +307,15 @@ class EVScenarioOptimizerTests(unittest.TestCase):
                 np.testing.assert_allclose(np.diff(q["state"].value)*8.5,
                     q["horizon"].dt*q["chemical"].value-q["horizon"].trip_kwh, atol=1e-6)
 
-    def test_infeasible_scenario_is_not_discarded(self):
+    def test_unreachable_scenario_is_retained_with_soft_trip_slack(self):
         c = EVMPCController(vehicle())
         paths = ensemble(c.ev, trips=((), ((15, 30, 1000),)))
         f = replace(paths.forecasts[0], providers={c.equipment_name: SimpleNamespace(at=lambda *args: paths)})
         c._solve(paths.issued_at, .5, f)
-        self.assertTrue(c.fallback)
+        self.assertFalse(c.fallback)
+        self.assertGreater(c.solve_history[-1]["predicted_trip_shortfall_kwh_max"], 0)
+        self.assertEqual(c.solve_history[-1]["predicted_scenarios_with_trip_shortfall"], 1)
+        self.assertEqual(len(c.plans[-1]["scenarios"]), 2)
         self.assertEqual(c.next_solve, paths.issued_at+pd.Timedelta(minutes=15))
 
     def test_uncertified_rainflow_uses_baseline_fallback(self):
@@ -302,11 +366,18 @@ class EVScenarioOptimizerTests(unittest.TestCase):
 
 class EVScenarioPipelineTests(unittest.TestCase):
     def test_short_three_case_run_fixed_clock_and_outputs(self):
+        self.check_pipeline(True)
+
+    def test_optional_twin_uses_extended_baseline_and_two_case_outputs(self):
+        self.check_pipeline(False)
+
+    def check_pipeline(self, run_twin):
         ev = vehicle(formulation="milp", solver="SCIPY", horizon_hours=1,
                      enable_degradation=True, degradation_method="linear_throughput")
         home = replace(CONFIG.homes[0], evs=(ev,))
         doc = {"defaults": {"ev": dict(controller="mpc", formulation="milp", solver="SCIPY",
             horizon_hours=1, forecast=dict(mode="scenario", scenario_count=2))}}
+        doc["run_non_v2h_twin"] = run_twin
         controls = {"evs": {ev.vehicle_id: resolve_control(doc, home.home_id, "ev", ev.vehicle_id)},
                     **{d: resolve_control(doc, home.home_id, d) for d in ("hpwh", "hvac")}}
         mobility = historical()
@@ -317,17 +388,36 @@ class EVScenarioPipelineTests(unittest.TestCase):
             u = UnifiedConfiguration(cfg, {home.home_id: controls}, {home.home_id: {
                 "backed_loads": ["heat_pump", "water_heater"], "water_heater_hp_only": True}}, {}, doc,
                 warmup_hours=0, cooldown_hours=0)
-            result = run_home(u, home, {ev.vehicle_id: mobility})
-            self.assertEqual(tuple(result.cases), CASES)
+            result = run_unified(u, mobility_by_home={home.home_id: {ev.vehicle_id: mobility}})[home.home_id]
+            expected = CASES if run_twin else ("all_baseline", "advanced")
+            self.assertEqual(tuple(result.cases), expected)
+            saved = json.loads((Path(tmp)/"resolved_configuration.json").read_text())
+            self.assertEqual(saved["cases"], list(expected))
+            self.assertEqual(saved["backed_load_reference_case"], u.backed_load_reference_case)
+            if not run_twin:
+                self.assertFalse((Path(tmp)/home.home_id/"non_v2h_twin").exists())
+                self.assertFalse((Path(tmp)/"data/non_v2h_twin_aggregate.csv").exists())
+                baseline_dir = Path(tmp)/home.home_id/"all_baseline/data"
+                raw_all = pd.read_csv(baseline_dir/"raw_results_all_phases.csv", index_col=0, parse_dates=True)
+                self.assertEqual(raw_all.index[-1]+cfg.time_step,
+                                 pd.Timestamp(cfg.start_time)+cfg.duration+pd.Timedelta(hours=1))
+                self.assertTrue(pd.read_csv(baseline_dir/"evaluation_mask.csv").phase.eq("forecast_tail").any())
+                loads = pd.read_csv(baseline_dir/"backed_loads.csv")
+                np.testing.assert_allclose(loads.actual_backed_load_kw, loads.reference_backed_load_kw)
             name = f"EV_{ev.vehicle_id}"
             self.assertTrue(result.metrics.energy_adjusted_net_savings_usd.notna().all())
             self.assertTrue((Path(tmp)/home.home_id/"figures"/f"{name}_forecast_accuracy.png").exists())
             self.assertTrue((Path(tmp)/home.home_id/"figures/whole_home_savings_comparison.png").exists())
-            for case in CASES:
+            for case in expected:
                 row = result.solver_stats.loc[result.solver_stats.case.eq(case) & result.solver_stats.device.eq(name)].iloc[0]
                 self.assertEqual(row.attempts, 0 if case == "all_baseline" else 2)
                 self.assertEqual(row.failures, 0)
                 raw = result.cases[case]["raw"]
+                departure = mobility.start+pd.Timedelta(days=40, minutes=7)
+                arrival = departure+pd.Timedelta(minutes=5)
+                self.assertGreater(raw.loc[departure, f"{name} Trip Energy (kWh)"], 0)
+                self.assertEqual(raw.loc[arrival, f"{name} Trip Energy (kWh)"], 0)
+                self.assertTrue(raw.loc[~raw[f"{name} Parked"].astype(bool), f"{name} Electric Power (kW)"].eq(0).all())
                 battery = result.metrics.loc[result.metrics.case.eq(case) & result.metrics.device.eq(name)].iloc[0]
                 total = result.metrics.loc[result.metrics.case.eq(case) & result.metrics.device.eq("whole_home")].iloc[0]
                 self.assertAlmostEqual(battery.initial_stored_energy_kwh, raw[f"{name} Start Stored Energy (kWh)"].iloc[0])
@@ -341,6 +431,7 @@ class EVScenarioPipelineTests(unittest.TestCase):
                     plans = json.loads((directory/f"{name}_plans.json").read_text())
                     self.assertEqual(len(plans[0]["scenarios"]), 2)
                     issuance = pd.read_csv(directory/f"{name}_forecast_issuance.csv")
+                    self.assertTrue(issuance.backed_load_source.eq(f"shared {u.backed_load_reference_case} trajectory").all())
                     self.assertTrue(issuance.scenario_count.eq(2).all())
                     self.assertFalse(issuance.no_scenarios_selected.any())
                     errors = pd.read_csv(directory/f"{name}_forecast_errors.csv")
