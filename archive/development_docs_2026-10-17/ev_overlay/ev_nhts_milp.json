@@ -1,0 +1,32 @@
+{
+  "01A": {
+    "initial_soc_fraction": 0.5,
+    "hems": {
+      "controller": "mpc",
+      "source": "nhts",
+      "seed": 42,
+      "history_days": 30,
+      "forecast_margin_hours": 12,
+      "consumption_kwh_per_km": 0.25,
+      "charge_efficiency": 0.9,
+      "discharge_efficiency": 0.9,
+      "max_discharge_kw": 7.2,
+      "v2h": true,
+      "health_min_soc": 0.2,
+      "health_max_soc": 0.8,
+      "formulation": "milp",
+      "solver": "SCIPY",
+      "horizon_hours": 12,
+      "control_minutes": 15,
+      "cycling": "persistence",
+      "electricity_weight": 1,
+      "trip_weight": 100,
+      "health_low_weight": 1,
+      "health_high_weight": 1,
+      "persistence_weight": 0.001,
+      "max_charge_starts_24h": 4,
+      "max_discharge_starts_24h": 4,
+      "projection": "nearest"
+    }
+  }
+}

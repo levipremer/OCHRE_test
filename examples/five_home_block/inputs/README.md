@@ -1,5 +1,18 @@
 # Inputs
 
+## EV mobility
+
+`ev/NHTS_tripv2pub.csv` is the renamed, byte-identical NHTS input formerly
+called tripv2pub.csv; cleaning remains in the loader.
+The Audi 20-vehicle and 100-vehicle exports are available as CSV.gz and Parquet.
+Adapter tests cover both formats, so these are retained rather than pruned as
+duplicates. See the [unified pipeline](../../single_home_hems/docs/pipeline.md)
+for source selection, replay coverage and distance-based driving energy.
+Review dataset redistribution rights before publishing; no source permission
+or license is inferred from its presence in this working directory.
+
+## Building and weather
+
 `resstock_2024_2_up11/two_story_unconditioned_basement/` contains the active
 ResStock 2024.2 TMY3 upgrade 11 packages selected for the five-home block. Each
 home has two conditioned floors above grade and a separate unconditioned

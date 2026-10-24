@@ -461,7 +461,10 @@ def resample_and_reindex(df, time_res, start_time=None, duration=None, interpola
 
     start_year = start_time.year
     end_year = (end_time - time_res).year
-    if end_year > start_year:
+    # Prepared schedules may already cover both years (e.g. controller warm-up
+    # before January 1). Only repeat annual inputs when coverage is missing.
+    covers_window = df.index[0] <= start_time and df.index[-1] + init_time_res >= end_time
+    if end_year > start_year and not covers_window:
         # copy df for future years
         if len(df) % 8760 == 1:
             # remove last time step before duplicating annual
@@ -471,7 +474,8 @@ def resample_and_reindex(df, time_res, start_time=None, duration=None, interpola
 
         print(f'Simulation spans multiple years ({start_year}-{end_year}). Duplicating time series data.')
         df = pd.concat([df] * (end_year - start_year + 1), axis=0)
-        df.index = pd.date_range(init_start_time, periods=len(df), freq=init_time_res)
+        # Use the already-normalized timezone, not the source's original zone.
+        df.index = pd.date_range(df.index[0], periods=len(df), freq=init_time_res)
 
     # check if all data is available - extend by up to 2 time steps
     if df.index[0] <= start_time:

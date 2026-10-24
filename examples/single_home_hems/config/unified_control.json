@@ -1,0 +1,165 @@
+{
+  "run_non_v2h_twin": false,
+  "defaults": {
+    "ev": {
+      "controller": "baseline",
+      "formulation": "convex",
+      "solver": "CLARABEL",
+      "solver_options": {},
+      "horizon_hours": 12,
+      "forecast_hours": 12,
+      "control_minutes": 15,
+      "forecast": {
+        "mode": "perfect",
+        "file": null,
+        "scenario_method": "tod_dow_state_hier",
+        "scenario_count": 5,
+        "lookback_days": 21,
+        "knn_history_hours": 24,
+        "scenario_minutes": 15,
+        "prefix_control_intervals": 4
+      },
+      "enforce_cycle_limit": false,
+      "enforce_dwell_constraints": false,
+      "electricity_weight": 1,
+      "trip_weight": 10000,
+      "persistence_weight": 0,
+      "dwell_on_minutes": 30,
+      "dwell_off_minutes": 30,
+      "max_charge_starts_24h": null,
+      "max_discharge_starts_24h": null,
+      "projection": "nearest",
+      "projection_tracking_weight": 1,
+      "projection_switch_weight": 0,
+      "projection_threshold": 0.5,
+      "enforce_terminal_soc": false,
+      "enforce_discharge_budget": false,
+      "discharge_budget_soc": 1,
+      "mip_relative_gap": 0.05,
+      "health_soc_weight": 1,
+      "health_soc_min": 0.2,
+      "health_soc_max": 0.8,
+      "comfort_soc_min": 0.2,
+      "health_weight": 1,
+      "comfort_weight": 0,
+      "enable_degradation": false,
+      "degradation_method": "rainflow",
+      "rainflow_relative_tolerance": 0.001,
+      "rainflow_absolute_tolerance": 0.000001,
+      "rainflow_max_iterations": 100
+    },
+    "hpwh": {
+      "controller": "baseline",
+      "formulation": "convex",
+      "solver": "CLARABEL",
+      "solver_options": {},
+      "horizon_hours": 12,
+      "forecast_hours": 12,
+      "control_minutes": 15,
+      "forecast": {
+        "mode": "perfect",
+        "file": null,
+        "scenario_method": "daily_budget_high_rf_1"
+      },
+      "model": "rc",
+      "model_path": null,
+      "model_minutes": 15,
+      "parameters": {
+        "minimum_temperature_c": 38,
+        "minimum_setpoint_c": 45,
+        "maximum_setpoint_c": 60,
+        "nominal_hp_capacity_kw": null,
+        "max_cycles": 3,
+        "dwell_time_off": "0 days 00:15:00",
+        "dwell_time_on": "0 days 01:00:00",
+        "enforce_cycle_limit": true,
+        "enforce_dwell_constraints": false,
+        "minimum_lower_temperature_c": null,
+        "control_variation_weight": 0,
+        "cop": 3.9347,
+        "comfort_weight": 100,
+        "electricity_weight": 1,
+        "legionella_temperature_c": 48.888888888888886,
+        "legionella_weight": 0.001,
+        "legionella_cooldown_enabled": false,
+        "legionella_cooldown_memory": "0 days 06:00:00",
+        "legionella_cooldown_band_c": 6,
+        "persistence_weight": 0.001,
+        "water_use_peak_l_per_min": 0.75,
+        "water_use_two_hour_volume_l": 18
+      }
+    },
+    "hvac": {
+      "controller": "baseline",
+      "formulation": "convex",
+      "solver": "CLARABEL",
+      "solver_options": {},
+      "horizon_hours": 12,
+      "forecast_hours": 12,
+      "control_minutes": 15,
+      "forecast": {
+        "mode": "perfect",
+        "file": null,
+        "scenario_method": "daily_budget_high_rf_1"
+      }
+    }
+  },
+  "homes": {
+    "home_01": {
+      "hpwh": {
+        "controller": "baseline",
+        "model": "rc",
+        "formulation": "convex",
+        "solver": "GUROBI",
+        "horizon_hours": 12,
+        "control_minutes": 15,
+        "forecast": {
+          "mode": "perfect"
+        },
+        "parameters": {
+          "comfort_weight": 100,
+          "legionella_weight": 0.001,
+          "persistence_weight": 0.001,
+          "enforce_cycle_limit": false,
+          "enforce_dwell_constraints": false
+        }
+      },
+      "evs": {
+        "01A": {
+          "controller": "mpc",
+          "formulation": "milp",
+          "solver": "GUROBI",
+          "horizon_hours": 12,
+          "forecast_hours": 12,
+          "control_minutes": 15,
+          "forecast": {
+            "mode": "perfect"
+          },
+          "dwell_on_minutes": 60,
+          "dwell_off_minutes": 60,
+          "electricity_weight": 1,
+          "trip_weight": 10000,
+          "persistence_weight": 0,
+          "projection": "nearest",
+          "enforce_dwell_constraints": false,
+          "enforce_cycle_limit": false,
+          "health_soc_weight": 1000,
+          "health_soc_min": 0.2,
+          "health_soc_max": 0.8,
+          "comfort_soc_min": 0.4,
+          "enforce_terminal_soc": true,
+          "enforce_discharge_budget": false,
+          "discharge_budget_soc": 1,
+          "mip_relative_gap": 0.05,
+          "health_weight": 1,
+          "comfort_weight": 1000,
+          "enable_degradation": false,
+          "degradation_method": "rainflow",
+          "rainflow_relative_tolerance": 0.001,
+          "rainflow_absolute_tolerance": 0.000001,
+          "rainflow_max_iterations": 100
+        }
+      }
+    }
+  }
+}

@@ -16,6 +16,7 @@ import pandas as pd
 from ..forecast import PRICE_COLUMN, Forecast
 from ..water_heater_rc import WaterHeaterRCModel, rc_step_matrices
 from .water_heater_scenario import build_scenario_problem
+from .solver import solve_ocp, usable_solution
 
 
 DEFAULT_MODEL_PATH = (
@@ -48,6 +49,8 @@ class WaterHeaterPredictiveController:
     #model_timestep: float = 10.0
     horizon: pd.Timedelta = pd.Timedelta(hours=12)
     model_timestep: pd.Timedelta = pd.Timedelta(minutes=15)
+    control_interval: pd.Timedelta | None = None  # unified fixed clock; legacy default unchanged
+    _next_scheduled_solve: pd.Timestamp | None = field(default=None, init=False, repr=False)
     equipment_name: str = "Water Heating"
     minimum_temperature_c: float = 38.0
     minimum_setpoint_c: float = 45.0
@@ -62,6 +65,7 @@ class WaterHeaterPredictiveController:
     control_variation_weight: float = 0.00 # 0.003 0.002 or 0.001
     cop: float = 3.9347
     comfort_weight: float = 100.0
+    electricity_weight: float = 1.0
     legionella_temperature_c: float = (120.0 - 32.0) * 5.0 / 9.0
     legionella_weight: float = 0.001
     # Passive cooldown requires the physical RC model; state-space control
@@ -72,6 +76,7 @@ class WaterHeaterPredictiveController:
     persistence_weight: float = 0.001
     water_use_peak_l_per_min: float = 0.75
     water_use_two_hour_volume_l: float = 18.0
+    action_history: list = field(default_factory=list, init=False, repr=False)
 
     _model: dict[str, Any] | None = field(default=None, init=False, repr=False)
     _last_decision_time: pd.Timestamp | None = field(
@@ -116,6 +121,16 @@ class WaterHeaterPredictiveController:
     def __post_init__(self) -> None:
         self.horizon = pd.Timedelta(self.horizon)
         self.model_timestep = pd.Timedelta(self.model_timestep)
+        for name in ("dwell_time_on", "dwell_time_off"):
+            value = pd.Timedelta(getattr(self, name))
+            if pd.isna(value) or value < pd.Timedelta(0):
+                raise ValueError(f"HPWH {name} must be nonnegative")
+            setattr(self, name, value)
+        for name in ("enforce_cycle_limit", "enforce_dwell_constraints"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"HPWH {name} must be boolean")
+        if type(self.max_cycles) is not int or self.max_cycles < 0:
+            raise ValueError("HPWH max_cycles must be a nonnegative integer")
         if self.forecast_type not in {"perfect", "scenario"}:
             raise ValueError("forecast_type must be 'perfect' or 'scenario'")
         if self.optimization_kind not in {"convex", "milp"}:
@@ -172,6 +187,7 @@ class WaterHeaterPredictiveController:
         """Return the current setpoint from a receding-horizon optimization."""
         if previous_status is None:
             return {}
+        self._actuator_timestamp = pd.Timestamp(timestamp)
         prior_on = self._observe_heat_pump(timestamp, previous_status)
         nominal_capacity_w = previous_status.get(
             f"{self.equipment_name} Nominal Heat Pump Capacity (W)"
@@ -187,11 +203,19 @@ class WaterHeaterPredictiveController:
         # Observe every plant step so a short attainment between MPC solves
         # is remembered. Optimized future temperatures never refresh memory.
         self._observe_legionella_temperature(timestamp, measurement)
-        if (
+        if self.control_interval is not None:
+            if self._next_scheduled_solve is not None and timestamp < self._next_scheduled_solve:
+                return self._setpoint_control()
+            # Advance even after failure: retries cannot create off-clock solves.
+            self._next_scheduled_solve = timestamp + self.control_interval
+        elif (
             self._last_decision_time is not None
             and timestamp - self._last_decision_time < self.model_timestep
         ):
             return self._setpoint_control()
+        if hasattr(forecast, "for_device"):
+            forecast = forecast.for_device(self.equipment_name, timestamp, self.horizon)
+        self._ocp_started = time.perf_counter()
         if self.forecast_type == "scenario":
             # Forecast issuance follows the measured data's local quarter hours.
             if timestamp != timestamp.floor(self.model_timestep):
@@ -277,7 +301,8 @@ class WaterHeaterPredictiveController:
                         message=r"\s*The problem is either infeasible or unbounded.*",
                         category=UserWarning,
                     )
-                    problem.solve(solver=self.solver, **dict(self.solver_options))
+                    self._last_problem = problem
+                    solve_ocp(problem, self.solver, self.solver_options)
             except cp.error.SolverError:
                 duration = time.perf_counter() - solve_start
                 self.solve_durations_s["convex"].append(duration)
@@ -287,10 +312,7 @@ class WaterHeaterPredictiveController:
                 return self._setpoint_control()
             duration = time.perf_counter() - solve_start
             self.solve_durations_s["convex"].append(duration)
-            successful = (
-                problem.status in {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}
-                and heat.value is not None
-            )
+            successful = usable_solution(problem)
             self._record_solve_attempt(
                 timestamp, "convex", duration, str(problem.status), successful
             )
@@ -349,7 +371,8 @@ class WaterHeaterPredictiveController:
                         message=r"\s*The problem is either infeasible or unbounded.*",
                         category=UserWarning,
                     )
-                    problem.solve(solver=self.solver, **dict(self.solver_options))
+                    self._last_problem = problem
+                    solve_ocp(problem, self.solver, self.solver_options)
             except cp.error.SolverError:
                 duration = time.perf_counter() - solve_start
                 self.solve_durations_s["milp"].append(duration)
@@ -359,11 +382,7 @@ class WaterHeaterPredictiveController:
                 return self._setpoint_control()
             duration = time.perf_counter() - solve_start
             self.solve_durations_s["milp"].append(duration)
-            successful = (
-                problem.status
-                in {cp.OPTIMAL, cp.OPTIMAL_INACCURATE, cp.USER_LIMIT}
-                and heat.value is not None
-            )
+            successful = usable_solution(problem)
             self._record_solve_attempt(
                 timestamp, "milp", duration, str(problem.status), successful
             )
@@ -464,9 +483,14 @@ class WaterHeaterPredictiveController:
                 (forecast.data.index >= timestamp - self.model_timestep)
                 & (forecast.data.index < timestamp), "Water Heating (L/min)"
             ]
-            if past.empty or past.isna().any():
+            if past.empty and self.control_interval is not None and not self._history:
+                # Explicit startup: current measured draw, repeated measured state
+                # via the existing history initializer; no future actual samples.
+                observed[draw_position] = float(current_schedule["Water Heating (L/min)"])
+            elif past.empty or past.isna().any():
                 return self._setpoint_control()
-            observed[draw_position] = float(past.mean())
+            else:
+                observed[draw_position] = float(past.mean())
             self._update_history(delivered_heat, observed, measurement, model["m"])
             initial_state = self._lifted_state(model["m"])
 
@@ -497,12 +521,10 @@ class WaterHeaterPredictiveController:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="Solution may be inaccurate.*")
                 warnings.filterwarnings("ignore", message=r"\s*The problem is either infeasible or unbounded.*")
-                problem.solve(solver=self.solver, **dict(self.solver_options))
+                self._last_problem = problem
+                solve_ocp(problem, self.solver, self.solver_options)
             status = str(problem.status)
-            accepted = {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}
-            if self.optimization_kind == "milp":
-                accepted.add(cp.USER_LIMIT)
-            successful = problem.status in accepted and heat.value is not None
+            successful = usable_solution(problem)
         except cp.error.SolverError:
             status, successful = "solver_error", False
         duration = time.perf_counter() - start
@@ -647,7 +669,7 @@ class WaterHeaterPredictiveController:
             constraints.append(state[:, step + 1] == next_state)
 
         timestep_hours = self.model_timestep.total_seconds() / 3600
-        electricity_cost = 1/steps * cp.sum(
+        electricity_cost = self.electricity_weight/steps * cp.sum(
             cp.multiply(prices, heat / (model["rc"].cop if self.model_kind == "rc" else self.cop) * timestep_hours)
         )
         comfort_cost =  (self.comfort_weight * 1/steps * timestep_hours
@@ -743,7 +765,10 @@ class WaterHeaterPredictiveController:
                 "timestamp": pd.Timestamp(timestamp),
                 "optimization_kind": optimization_kind,
                 "duration_s": float(duration_s),
+                "ocp_seconds": time.perf_counter() - getattr(self, "_ocp_started", time.perf_counter()),
                 "status": status,
+                **getattr(getattr(self, "_last_problem", None), "hems_diagnostic", {}),
+                "fallback": not bool(successful),
                 "successful": bool(successful),
             }
         )
@@ -875,7 +900,7 @@ class WaterHeaterPredictiveController:
         else:
             persistence_cost = cp.Constant(0.0)
 
-        electricity_cost = 1/steps * cp.sum(
+        electricity_cost = self.electricity_weight/steps * cp.sum(
             cp.multiply(prices, heat / (model[
                                             "rc"].cop if self.model_kind == "rc" else self.cop) * timestep_hours)
         )
@@ -1360,4 +1385,28 @@ class WaterHeaterPredictiveController:
     def _setpoint_control(self) -> dict[str, dict[str, Any]]:
         if self._last_setpoint is None:
             return {}
-        return {self.equipment_name: {"Setpoint": self._last_setpoint}}
+        command = {"Setpoint": self._last_setpoint}
+        timestamp = getattr(self, "_actuator_timestamp", None)
+        prior = self._last_observed_on
+        if timestamp is not None and prior is not None and (
+            self.enforce_dwell_constraints or self.enforce_cycle_limit
+        ):
+            requested = int(self._last_setpoint == self.maximum_setpoint_c)
+            projected = requested
+            if self.enforce_dwell_constraints and self._remaining_dwell_steps(timestamp, prior):
+                projected = prior
+            # Match the OCP's first-step budget: horizon starts plus a one-bit
+            # recent-stop carry-in, NOT a new rolling hourly/daily cap.
+            if (self.enforce_cycle_limit and not prior and projected and
+                    1 + min(1, len(self._recent_off_times)) > self.max_cycles):
+                projected = 0
+            physical_override = bool(self.action_history and
+                self.action_history[-1]["projected_mode"] != prior)
+            self.action_history.append(dict(timestamp=timestamp, requested_mode=requested,
+                projected_mode=projected, projection_override=projected != requested,
+                physical_override=physical_override))
+            # A low setpoint alone cannot block thermostat starts. Native binary
+            # duty control enforces the projected mode and retains max-temp safety.
+            command["HP Duty Cycle"] = projected
+            command["ER Duty Cycle"] = 0
+        return {self.equipment_name: command}

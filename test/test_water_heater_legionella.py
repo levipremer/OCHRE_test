@@ -232,7 +232,7 @@ class WaterHeaterLegionellaTests(unittest.TestCase):
         forecast = Forecast(pd.DataFrame(
             {"Water Heating (L/min)": 0.0}, index=index
         ))
-        problem = SimpleNamespace(status=cp.OPTIMAL, solve=lambda **_: None)
+        problem = SimpleNamespace(status=cp.OPTIMAL, solve=lambda **_: None, variables=lambda: [], constraints=[])
         heat = SimpleNamespace(value=np.zeros(4))
         with (
             patch.object(controller, "_load_model", return_value=self._cooldown_model()),
@@ -323,6 +323,7 @@ class WaterHeaterLegionellaTests(unittest.TestCase):
         problem = SimpleNamespace(
             status=cp.OPTIMAL,
             solve=lambda **_: None,
+            variables=lambda: [], constraints=[],
         )
         heat = SimpleNamespace(value=np.array([0.0]))
         with (
@@ -369,7 +370,7 @@ class WaterHeaterLegionellaTests(unittest.TestCase):
             optimization_kind="milp",
         )
         model = {"output_names": ("upper", "lower"), "m": 1}
-        problem = SimpleNamespace(status=cp.OPTIMAL, value=0.0)
+        problem = SimpleNamespace(status=cp.OPTIMAL, value=0.0, variables=lambda: [], constraints=[])
         problem.solve = lambda **_: None
         heat = SimpleNamespace(value=np.array([0.0]))
         with (

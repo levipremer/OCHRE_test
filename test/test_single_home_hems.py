@@ -13,7 +13,6 @@ from examples.five_home_block.five_home_block.config import load_configuration
 from examples.single_home_hems.hems import HEMSController
 from examples.single_home_hems.single_home_hems.controllers import (
     CompositeController,
-    EVPredictiveController,
     HVACPredictiveController,
     WaterHeaterPredictiveController,
 )
@@ -89,7 +88,7 @@ class SingleHomeSelectionTests(unittest.TestCase):
         self.assertEqual(price.price_at(pd.Timestamp("2018-01-01 17:59")), 0.30)
         self.assertEqual(price.price_at(pd.Timestamp("2018-01-01 18:00")), 0.15)
 
-    def test_hems_blocks_home_one_ev_only_during_peak(self) -> None:
+    def test_default_hems_preserves_immediate_charge_baseline(self) -> None:
         controller = HEMSController()
         forecast = self.forecast()
         peak_controls = controller.controls_for_step(
@@ -104,7 +103,7 @@ class SingleHomeSelectionTests(unittest.TestCase):
             current_schedule={},
             forecast=forecast,
         )
-        self.assertEqual(peak_controls, {"EV_01A": {"Load Fraction": 0}})
+        self.assertEqual(peak_controls, {})
         self.assertEqual(off_peak_controls, {})
 
     def test_forecast_returns_requested_horizon(self) -> None:
@@ -130,8 +129,9 @@ class SingleHomeSelectionTests(unittest.TestCase):
             self.assertEqual(controls, {})
 
     def test_composite_rejects_overlapping_device_commands(self) -> None:
+        from unittest.mock import Mock
         duplicate_ev_controllers = CompositeController(
-            (EVPredictiveController(), EVPredictiveController())
+            tuple(Mock(controls_for_step=Mock(return_value={"EV_01A": {"P Setpoint": 0}})) for _ in range(2))
         )
         with self.assertRaisesRegex(ValueError, "Multiple controllers"):
             duplicate_ev_controllers.controls_for_step(
@@ -519,7 +519,7 @@ class SingleHomeSelectionTests(unittest.TestCase):
         )
         with self.assertRaises(TypeError):
             SingleHomeHEMSSimulation._validate_controls({"EV": 0.0}, timestamp)
-        with self.assertRaisesRegex(ValueError, "only be controlled through Setpoint"):
+        with self.assertRaisesRegex(ValueError, "supports Setpoint"):
             SingleHomeHEMSSimulation._validate_controls(
                 {"Water Heating": {"Load Fraction": 0.0}},
                 timestamp,

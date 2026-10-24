@@ -26,7 +26,7 @@
 	    "vehicle_type": "SUV",
 	    "capacity_kwh": 120,
 	    "charger_power_kw": 11.5,
-	    "nom_commute_arrival_time": "18:20",
+	    "nom_commute_arrival_time": "15:20",
 	    "nom_commute_departure_time": "08:30",
 	    "work_from_home_probability": 0.3,
 	    "initial_soc_fraction": 0.6,

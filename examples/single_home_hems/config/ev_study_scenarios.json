@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "run_non_v2h_twin": false,
+  "name": "audi_scenario_selection",
+  "home_config": "examples/single_home_hems/config/unified_home.json",
+  "control_config": "examples/single_home_hems/config/unified_control.json",
+  "output_directory": "examples/single_home_hems/outputs/ev_scenario_gurobi_health",
+  "home_id": "home_01",
+  "vehicle_id": "01A",
+  "duration_hours": 120,
+  "warmup_hours": 24,
+  "cooldown_hours": 24,
+  "pair_mobility_by_seed": true,
+  "horizon_hours": 12,
+  "control_minutes": 15,
+  "initial_socs": [
+    0.4
+  ],
+  "schedule_cases": [
+    {
+      "id": "jan_41",
+      "start_time": "2018-01-03T00:00:00",
+      "mobility_seed": 41,
+      "home_seed": 20260805,
+      "source_vehicle": "CA_9b0b323c8282c74c"
+    },
+    {
+      "id": "jan_42",
+      "start_time": "2018-01-03T00:00:00",
+      "mobility_seed": 42,
+      "home_seed": 20260805,
+      "source_vehicle": "CA_b92c6172f398c10e"
+    },
+    {
+      "id": "jan_43",
+      "start_time": "2018-01-03T00:00:00",
+      "mobility_seed": 43,
+      "home_seed": 20260805,
+      "source_vehicle": "CA_d7b156076b3a51c8"
+    },
+    {
+      "id": "feb_41",
+      "start_time": "2018-02-03T00:00:00",
+      "mobility_seed": 41,
+      "home_seed": 20260805,
+      "source_vehicle": "CA_9b0b323c8282c74c"
+    },
+    {
+      "id": "feb_42",
+      "start_time": "2018-02-03T00:00:00",
+      "mobility_seed": 42,
+      "home_seed": 20260805,
+      "source_vehicle": "CA_b92c6172f398c10e"
+    },
+    {
+      "id": "feb_43",
+      "start_time": "2018-02-03T00:00:00",
+      "mobility_seed": 43,
+      "home_seed": 20260805,
+      "source_vehicle": "CA_d7b156076b3a51c8"
+    }
+  ],
+  "common_ev_controls": {
+    "solver": "GUROBI",
+    "solver_options": {},
+    "electricity_weight": 1,
+    "trip_weight": 10000,
+    "health_weight": 1,
+    "health_soc_min": 0.2,
+    "health_soc_max": 0.8,
+    "comfort_soc_min": 0.4,
+    "comfort_weight": 1000,
+    "health_soc_weight": 1000,
+    "cycling": "none",
+    "persistence_weight": 0,
+    "enforce_cycle_limit": false,
+    "enforce_dwell_constraints": false,
+    "enforce_terminal_soc": true,
+    "enforce_discharge_budget": false,
+    "mip_relative_gap": 0.05,
+    "rainflow_relative_tolerance": 0.001,
+    "rainflow_absolute_tolerance": 0.000001,
+    "rainflow_max_iterations": 100,
+    "projection_switch_weight": 0,
+    "formulation": "milp",
+    "forecast": {
+      "mode": "scenario",
+      "scenario_method": "knn_state",
+      "scenario_count": 5,
+      "lookback_days": 28,
+      "knn_history_hours": 24,
+      "scenario_minutes": 15,
+      "prefix_control_intervals": 4
+    }
+  },
+  "_comments": {
+    "execution": "Stage only. 3 objectives x 3 scenario counts x 3 selection methods x 6 situations = 162 jobs. No full study is run without --run.",
+    "pairing": "Same Jan/Feb five-day windows, mobility seeds/vehicles, physical settings and initial SOC as ev30_dynamic_soh_v4. Corrected simulation-start anchoring selects later source windows with real preceding history; old realized traces are not reused. Each new trace is frozen across all 60 combinations and replayed in February.",
+    "forecast": "28-day historical candidate bank; completed trajectories only, with no temporal overlap within each selected set. kNN uses 6/12/24 hours of prior home/away history. Reserve at least 29 days before warmup; the inherited 30-day buffer is retained. Requested counts may be reduced if insufficient eligible candidates exist, and diagnostics record the actual count.",
+    "prefix": "Four 15-minute persistent-state intervals. Overwritten arrival demand is deferred to the next arrival after the prefix. The short smoke fixture reduces prefix length to fit its shortened horizon.",
+    "objectives": "All MILP: electricity + departure comfort (1000) + SOC health (1000) + daily-minimum terminal energy value. Forecast unmet driving energy is a bounded soft slack weighted at 10000 and normalized by current faded capacity, not horizon length. Monetary degradation is none, throughput or multicut rainflow. Overall health and electricity weights are 1. Caps, dwell, persistence penalty and discharge budget remain off.",
+    "outputs": "paired_metrics.csv has one row per combination and separate case/device-prefixed statistics. paired_summary.csv remains long-form. Only common completed situational cases are averaged; paired_case_count reports coverage. No staged metrics are fabricated.",
+    "reuse_all_baseline": "Reuse only all-baseline plant trajectories with identical physical/mobility/comfort inputs and code/runtime fingerprints. Recompute metrics and keep complete outputs in every job. Non-V2H twins and advanced controls always run independently.",
+    "scope": "GUROBI is selected and requires the unrestricted academic license for this host. HPWH/HVAC baseline, V2H enabled, initial SOC 0.4, 120-hour evaluation, 24-hour warmup/cooldown, 12-hour forecast, 15-minute control. Warmup/cooldown excluded from metrics."
+  },
+  "reuse_all_baseline": true,
+  "configuration_axes": {
+    "objective_variant": [
+      {
+        "id": "health",
+        "value": "Milp_energy_comf_term_health",
+        "ev_controls": {
+          "enable_degradation": false,
+          "degradation_method": "none"
+        }
+      }
+
+    ],
+    "scenario_count": [
+      {
+        "id": "n5",
+        "value": 5,
+        "ev_controls": {
+          "forecast": {
+            "scenario_count": 5
+          }
+        }
+      },
+      {
+        "id": "n7",
+        "value": 7,
+        "ev_controls": {
+          "forecast": {
+            "scenario_count": 7
+          }
+        }
+      },
+      {
+        "id": "n10",
+        "value": 10,
+        "ev_controls": {
+          "forecast": {
+            "scenario_count": 10
+          }
+        }
+      }
+    ],
+    "scenario_selection": [
+      {
+        "id": "tod",
+        "value": "tod_only",
+        "ev_controls": {
+          "forecast": {
+            "scenario_method": "tod_only"
+          }
+        }
+      },
+      {
+        "id": "hier",
+        "value": "tod_dow_state_hier",
+        "ev_controls": {
+          "forecast": {
+            "scenario_method": "tod_dow_state_hier"
+          }
+        }
+      },
+      {
+        "id": "knn12",
+        "value": "knn_state_12h",
+        "ev_controls": {
+          "forecast": {
+            "scenario_method": "knn_state",
+            "knn_history_hours": 12
+          }
+        }
+      }
+
+    ]
+  }
+}

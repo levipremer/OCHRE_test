@@ -36,6 +36,12 @@ ochre/defaults/Input Files/OCHRE*
 /examples/**/outputs*/
 /output/
 /tmp/
+# Local test scratch space and generated Matplotlib font caches.
+/.test-tmp/
+/ochre_five_home_cache/
+/ochre_five_home_matplotlib/
+/ochre_single_home_matplotlib/
+/ochre_training_matplotlib/
 
 # Retain inference parameters, but omit generated model diagnostics.
 /examples/single_home_hems/models/*/figures/
