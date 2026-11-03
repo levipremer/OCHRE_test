@@ -136,6 +136,75 @@ class WaterHeaterScenarioOptimizerTests(unittest.TestCase):
             expected_value = max(values) if name == "comfort" else np.mean(values)
             self.assertAlmostEqual(float(actual), float(expected_value), places=7)
 
+    def test_milp_terminal_cost_averages_positive_endpoint_shortfalls(self):
+        controller = self.controller(
+            "milp", forecast_type="scenario", terminal_weight=0.5,
+            comfort_weight=0, minimum_temperature_c=0,
+        )
+        initial_state = np.full(2, 42.0)
+        paths = np.zeros((2, 1, 2))
+        problem, heat, _ = controller.optimization_problem_milp_scenario(
+            initial_state, np.zeros(2), paths, self.model(),
+            prior_on=0, recent_cycles=0, previous_heat_kw=0,
+        )
+        # The first action is shared. The second path ends above 110 F while
+        # the first ends below it, so shortfalls must be clipped path by path.
+        problem = cp.Problem(
+            problem.objective,
+            [*problem.constraints, heat == np.array([[0, 0], [0, 2]])],
+        )
+        self.solve(problem, "milp")
+        controller._record_objective_components(pd.Timestamp("2018-01-01"), problem)
+        expected = 0.5 * ((110 - 32) * 5 / 9 - 42) / 2
+        components = controller.objective_component_history.iloc[0]
+        self.assertAlmostEqual(components["terminal_objective_cost"], expected)
+        self.assertAlmostEqual(problem.value, expected)
+        self.assertAlmostEqual(components["objective_balance_error"], 0)
+
+    def test_terminal_weight_is_restricted_to_milp_scenarios(self):
+        for options in (
+            {"terminal_weight": -1},
+            {"terminal_weight": np.nan},
+            {"terminal_weight": 0.1, "forecast_type": "perfect"},
+            {"terminal_weight": 0.1, "forecast_type": "scenario", "optimization_kind": "convex"},
+        ):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                WaterHeaterPredictiveController(**options)
+
+    def test_scenario_horizon_accepts_requested_quarter_hour_steps(self):
+        for hours in (3, 4, 6, 8, 12, 16, 24):
+            with self.subTest(hours=hours):
+                controller = WaterHeaterPredictiveController(
+                    forecast_type="scenario", horizon=pd.Timedelta(hours=hours),
+                )
+                self.assertEqual(controller.horizon, pd.Timedelta(hours=hours))
+        with self.assertRaisesRegex(ValueError, "15-minute steps"):
+            WaterHeaterPredictiveController(
+                forecast_type="scenario", horizon=pd.Timedelta(minutes=31),
+            )
+
+    def test_gurobi_time_limit_record_preserves_incumbent_distinction(self):
+        controller = self.controller("milp")
+        dummy_problem = SimpleNamespace(
+            solver_stats=SimpleNamespace(
+                solve_time=300.0, extra_stats=SimpleNamespace(Status=9),
+            )
+        )
+        controller._record_solve_attempt(
+            pd.Timestamp("2018-01-01"), "milp", 301.0, "user_limit", True,
+            problem=dummy_problem, incumbent_available=True,
+        )
+        controller._record_solve_attempt(
+            pd.Timestamp("2018-01-01 00:15"), "milp", 301.0,
+            "infeasible_inaccurate", False, problem=dummy_problem,
+            incumbent_available=False,
+        )
+        history = controller.solve_history
+        self.assertEqual(history["time_limit_hit"].tolist(), [True, True])
+        self.assertEqual(history["solve_failed"].tolist(), [False, True])
+        self.assertEqual(history["solver_status_code"].tolist(), [9, 9])
+        self.assertEqual(history["solver_time_s"].tolist(), [300.0, 300.0])
+
     def test_scenario_masks_ignore_future_real_draws(self):
         controller = WaterHeaterPredictiveController(forecast_type="scenario")
         start = pd.Timestamp("2018-01-01 02:00")

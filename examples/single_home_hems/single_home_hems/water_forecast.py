@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from ..water_usage_forecasting.data import FLOW_COLUMN, aggregate_flow
+from ..water_usage_forecasting.scenario_choice import ChoiceConfig, select_scenarios
 from ..water_usage_forecasting.rf_shortlead import (
     RFShortLeadConfig, apply_rf_shortlead, fit_rf_shortlead,
 )
@@ -22,7 +23,26 @@ from ..water_usage_forecasting.scenario_methods import (
 )
 
 
-SCENARIO_METHODS = ("daily_budget_high_rf_1", "daily_budget_high")
+RMSE_VOLUME_6H_COUNTS = (5, 7, 10)
+RMSE_VOLUME_6H_METHODS = {
+    name: count
+    for count in RMSE_VOLUME_6H_COUNTS
+    for name in (f"rmse_volume_6h_k{count}", f"rmse_volume_6h_k{count}_rf_1")
+}
+STUDY_CHOICE_METHODS = {
+    f"{label}_k{count}_rf_1": (choice_method, count)
+    for label, choice_method in (
+        ("day_type", "day_type"),
+        ("morning_progress", "progress"),
+        ("tail_anchored", "tail_anchored"),
+        ("recent", "recent"),
+    )
+    for count in RMSE_VOLUME_6H_COUNTS
+}
+SCENARIO_METHODS = (
+    "daily_budget_high_rf_1", "daily_budget_high", *RMSE_VOLUME_6H_METHODS,
+    *STUDY_CHOICE_METHODS,
+)
 DEFAULT_WATER_DATA = (
     Path(__file__).resolve().parents[1]
     / "external_data" / "water_flow_dchouse_l_per_min.csv"
@@ -146,12 +166,13 @@ class DCHouseWaterData:
 
 @dataclass
 class ScenarioWaterForecast:
-    """Generate 48-step forecasts with a frozen, pre-simulation RF fit.
+    """Generate quarter-hour forecasts from completed historical water use.
 
-    All complete paths in the lookback window are retained. Conditioning
-    weights are used for the RF's first-step mean projection, while the MPC
-    explicitly uses uniform probabilities. Without RF, budget weights are
-    diagnostic only under this equal-probability interpretation.
+    The daily-budget methods retain all complete paths in the lookback window;
+    selection methods choose 5, 7, or 10 intact paths. The ``_rf_1`` variants
+    adjust only the first selected lead using the training-only RF projection.
+    Budget conditioning weights are used only for the RF's first-step mean
+    projection. MPC uses uniform probabilities for every method.
     """
 
     data: DCHouseWaterData
@@ -165,11 +186,36 @@ class ScenarioWaterForecast:
     def __post_init__(self) -> None:
         if self.method not in SCENARIO_METHODS:
             raise ValueError(f"Scenario method must be one of {SCENARIO_METHODS}")
-        if self.horizon != pd.Timedelta(hours=12) or self.timestep != pd.Timedelta(minutes=15):
-            raise ValueError("Water scenarios currently require a 12-hour horizon and 15-minute model steps")
+        self.horizon = pd.Timedelta(self.horizon)
+        self.timestep = pd.Timedelta(self.timestep)
+        if (pd.isna(self.horizon) or self.horizon <= pd.Timedelta(0)
+                or self.timestep != pd.Timedelta(minutes=15)
+                or self.horizon % self.timestep != pd.Timedelta(0)):
+            raise ValueError("Water scenarios require a positive whole-step horizon and 15-minute model steps")
+        self.choice_count = RMSE_VOLUME_6H_METHODS.get(self.method)
+        if self.choice_count is not None:
+            self.choice_config = ChoiceConfig(
+                method="rmse_volume", count=self.choice_count,
+                hours_preceding=6, volume_weight=0.5,
+            )
+        elif self.method in STUDY_CHOICE_METHODS:
+            choice_method, self.choice_count = STUDY_CHOICE_METHODS[self.method]
+            self.choice_config = ChoiceConfig(
+                method=choice_method, count=self.choice_count,
+                hours_preceding=6, volume_weight=0.5,
+                progress_start_hour=6 if choice_method == "progress" else None,
+                progress_end_hour=12 if choice_method == "progress" else None,
+            )
+        else:
+            self.choice_config = None
+        steps = int(self.horizon / self.timestep)
         self.config = ScenarioConfig(
+            horizon_hours=self.horizon.total_seconds() / 3600,
+            interval_minutes=15,
             lookback_days=self.lookback_days,
-            morning_policy="remaining_budget_high_only",
+            morning_policy=(
+                "none" if self.choice_count is not None else "remaining_budget_high_only"
+            ),
         )
         self._interval_flow = aggregate_flow(self.data.flow, 15)
         training = self._interval_flow.loc[
@@ -177,10 +223,28 @@ class ScenarioWaterForecast:
         ]
         initial = generate_scenarios(
             training, self.data.source_start,
-            pd.date_range(self.data.source_start, periods=48, freq=self.timestep), self.config,
+            pd.date_range(self.data.source_start, periods=steps, freq=self.timestep), self.config,
         )
-        if len(initial.values) < min(7, self.lookback_days):
-            raise ValueError("Water source start needs at least seven complete historical paths (or the full shorter lookback)")
+        required = self.choice_count if self.choice_count is not None else min(7, self.lookback_days)
+        if len(initial.values) < required:
+            if self.choice_count is None:
+                raise ValueError(
+                    "Water source start needs at least seven complete historical paths "
+                    "(or the full shorter lookback)"
+                )
+            raise ValueError(
+                f"Water source start needs at least {required} complete historical paths"
+            )
+        if self.choice_config is not None:
+            selected = select_scenarios(
+                training, self.data.source_start,
+                pd.date_range(self.data.source_start, periods=steps, freq=self.timestep),
+                self.config, self.choice_config, candidate_pool=initial,
+            )
+            if len(selected.values) != self.choice_count:
+                raise ValueError(
+                    f"Water source start needs {self.choice_count} eligible paths for {self.method}"
+                )
         self._initial_candidate_count = len(initial.values)
         self.rf_model = fit_rf_shortlead(training, self.rf_config) if self.method.endswith("_rf_1") else None
 
@@ -191,9 +255,18 @@ class ScenarioWaterForecast:
         if origin.minute % 15 or origin.second or origin.microsecond or origin.nanosecond:
             raise ValueError("Scenario forecast origins must align to local quarter hours")
         history = self._interval_flow.loc[self._interval_flow.index + self.timestep <= origin]
-        scenarios = generate_scenarios(
-            history, origin, pd.date_range(origin, periods=48, freq=self.timestep), self.config,
-        )
+        future = pd.date_range(origin, periods=int(self.horizon / self.timestep), freq=self.timestep)
+        if self.choice_config is None:
+            scenarios = generate_scenarios(history, origin, future, self.config)
+        else:
+            scenarios = select_scenarios(
+                history, origin, future, self.config, self.choice_config,
+            )
+            if len(scenarios.values) != self.choice_count:
+                raise ValueError(
+                    f"Scenario origin {origin} has fewer than {self.choice_count} "
+                    f"eligible paths for {self.method}"
+                )
         if self.rf_model is not None:
             scenarios = apply_rf_shortlead(scenarios, history, self.rf_model, steps=1)
         diagnostics = dict(scenarios.diagnostics)
@@ -212,14 +285,42 @@ class ScenarioWaterForecast:
 
     @property
     def metadata(self) -> dict[str, object]:
-        return {
+        if self.choice_count is not None:
+            conditioning_policy = (
+                "equal selected-path weights; RF first-step mean projection"
+                if self.rf_model is not None else
+                "equal selected-path weights; no first-step adjustment"
+            )
+        else:
+            conditioning_policy = (
+                "75% median morning budget gate, 5% uniform mixture; RF mean projection only"
+            )
+        metadata = {
             **self.data.metadata,
             "scenario_method": self.method,
-            "horizon_hours": 12,
+            "horizon_hours": self.horizon.total_seconds() / 3600,
             "interval_minutes": 15,
             "lookback_days": self.lookback_days,
             "initial_complete_candidate_count": self._initial_candidate_count,
             "optimization_probability_policy": "uniform",
-            "conditioning_weight_policy": "75% median morning budget gate, 5% uniform mixture; RF mean projection only",
+            "conditioning_weight_policy": conditioning_policy,
             "rf_model": self.rf_model.diagnostics if self.rf_model is not None else None,
         }
+        if self.choice_count is not None:
+            metadata.update({
+                "requested_scenario_count": self.choice_count,
+                "selection_method": self.choice_config.method,
+                "selection_hours_preceding": (
+                    self.choice_config.hours_preceding
+                    if self.choice_config.method in {"rmse_volume", "tail_anchored"} else None
+                ),
+                "selection_volume_weight": (
+                    self.choice_config.volume_weight
+                    if self.choice_config.method in {"rmse_volume", "tail_anchored"} else None
+                ),
+                "tail_ranking_hours": (
+                    self.horizon.total_seconds() / 3600
+                    if self.choice_config.method == "tail_anchored" else None
+                ),
+            })
+        return metadata

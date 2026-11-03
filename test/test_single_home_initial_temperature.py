@@ -28,6 +28,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIRECTORY = REPO_ROOT / "examples" / "five_home_block" / "config"
 
 
+class CoolingSetpointController:
+    """Exercise an HVAC command that conflicts with the seasonal setting."""
+
+    def controls_for_step(self, timestamp, previous_status, current_schedule, forecast):
+        return {"HVAC Cooling": {"Setpoint": 21.5}}
+
+
 class SingleHomeInitialTemperatureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -40,6 +47,8 @@ class SingleHomeInitialTemperatureTests(unittest.TestCase):
         *,
         apply_controls: bool = True,
         random_seed: int = 123,
+        heating_season: bool | None = None,
+        controller: HEMSController | None = None,
         **simulation_options,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Use the real factory and OCHRE envelope, without rendering plots."""
@@ -53,11 +62,15 @@ class SingleHomeInitialTemperatureTests(unittest.TestCase):
                 initialization_time=None,
                 random_seed=random_seed,
                 output_directory=Path(directory),
+                heating_season=(
+                    self.config.heating_season
+                    if heating_season is None else heating_season
+                ),
             )
             simulation = SingleHomeHEMSSimulation(
                 config,
                 self.home,
-                HEMSController(device_controllers=()),
+                controller or HEMSController(device_controllers=()),
                 **simulation_options,
             )
             results = simulation._run_stepwise(
@@ -98,6 +111,23 @@ class SingleHomeInitialTemperatureTests(unittest.TestCase):
         self.assertEqual(controlled.iloc[0]["indoor_temperature_c"], 23.5)
         self.assertEqual(baseline.iloc[0]["indoor_temperature_c"], 23.5)
         pd.testing.assert_frame_equal(controlled, baseline)
+
+    def test_heating_season_keeps_cooling_at_30_in_controlled_and_baseline_runs(self) -> None:
+        simulation = SingleHomeHEMSSimulation(
+            self.config,
+            self.home,
+            HEMSController(device_controllers=()),
+        )
+        self.assertEqual(simulation._seasonal_hvac_controls({}), {})
+        baseline, _ = self._run_two_steps(apply_controls=False)
+        commanded, _ = self._run_two_steps(
+            controller=HEMSController(device_controllers=(CoolingSetpointController(),)),
+        )
+        unflagged, _ = self._run_two_steps(heating_season=False)
+
+        self.assertEqual(set(baseline["cooling_setpoint_c"]), {30.0})
+        self.assertEqual(set(commanded["cooling_setpoint_c"]), {30.0})
+        self.assertEqual(set(unflagged["cooling_setpoint_c"]), {self.home.cooling_setpoint_c})
 
     def test_random_initialization_requires_explicit_none(self) -> None:
         with patch("numpy.random.uniform", return_value=0.25) as random_draw:

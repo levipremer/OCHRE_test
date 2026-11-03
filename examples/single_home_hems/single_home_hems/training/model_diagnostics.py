@@ -120,6 +120,40 @@ def create_state_space_diagnostic_outputs(
     return figure_paths
 
 
+def create_state_space_selection_outputs(
+    *,
+    model: dict[str, Any],
+    model_output: Path,
+    disturbance_names: tuple[str, ...],
+    model_label: str,
+    solar_azimuth_by_disturbance: dict[str, int] | None = None,
+    model_timestep_minutes: float = 15.0,
+) -> tuple[Path, ...]:
+    """Save model-selection diagnostics without fixed-horizon prediction plots."""
+    directory = Path(model_output) / "figures"
+    directory.mkdir(parents=True, exist_ok=True)
+    paths = tuple(
+        directory / name
+        for name in (
+            "memory_selection.png",
+            "lambda_selection.png",
+            "selected_disturbances.png",
+        )
+    )
+    _plot_memory_selection(
+        model, model_label, paths[0], timestep_minutes=model_timestep_minutes
+    )
+    _plot_lambda_selection(model, model_label, paths[1])
+    _plot_selected_disturbances(
+        model,
+        disturbance_names,
+        model_label,
+        paths[2],
+        solar_azimuth_by_disturbance or {},
+    )
+    return paths
+
+
 def _state_space_arrays(
     model: dict[str, Any],
     frame: pd.DataFrame,
@@ -690,6 +724,8 @@ def _plot_memory_selection(
     model: dict[str, Any],
     model_label: str,
     path: Path,
+    *,
+    timestep_minutes: float = 15.0,
 ) -> None:
     memories = np.asarray(model["memory_candidates"], dtype=int)
     aicc = np.asarray(model["aicc_values"], dtype=float)
@@ -701,7 +737,7 @@ def _plot_memory_selection(
     data = pd.DataFrame(
         {
             "memory_steps": memories,
-            "memory_minutes": memories * 15,
+            "memory_minutes": memories * timestep_minutes,
             "aicc": aicc,
             "delta_aicc": delta,
             "minimum_aicc": memories == standard_memory,
@@ -732,7 +768,7 @@ def _plot_memory_selection(
         zorder=6,
         label="Relative-AICc selection",
     )
-    axis.set_xlabel("Memory (15-minute steps)")
+    axis.set_xlabel(f"Memory ({timestep_minutes:g}-minute steps)")
     axis.set_ylabel("AICc increase above minimum")
     axis.set_title(f"{model_label}: memory selection")
     axis.set_xticks(memories)

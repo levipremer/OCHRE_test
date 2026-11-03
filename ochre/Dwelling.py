@@ -93,7 +93,21 @@ class Dwelling(Simulator):
             properties, weather_station=weather_station, **house_args
         )
         properties["location"] = location
-        self.start_time = self.start_time.replace(tzinfo=schedule.index.tzinfo)
+        schedule_tz = schedule.index.tz
+        if schedule_tz is not None:
+            if self.start_time.tzinfo is None:
+                self.start_time = self.start_time.tz_localize(schedule_tz)
+            else:
+                self.start_time = self.start_time.tz_convert(schedule_tz)
+        elif self.start_time.tzinfo is not None:
+            raise OCHREException(
+                "A timezone-aware simulation start requires a timezone-aware schedule."
+            )
+        self.current_time = self.start_time
+        self.sim_times = pd.date_range(
+            self.start_time, self.start_time + self.duration,
+            freq=self.time_res, inclusive="left",
+        )
 
         # Save HPXML properties to json file
         if self.save_results and (save_args_to_json or self.verbosity >= 3):

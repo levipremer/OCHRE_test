@@ -10,6 +10,7 @@ import numba  # required for array-based psychrolib
 import psychrolib
 import pytz
 import pvlib
+from zoneinfo import ZoneInfo
 
 from ochre.utils import OCHREException, default_input_path, load_csv, convert
 from ochre.utils.envelope import calculate_solar_irradiance
@@ -121,7 +122,29 @@ def set_annual_index(df, start_year, offset=None, timezone=None):
 
 
 # FUTURE: could get epw file from API, ResStock uses https://data.nrel.gov/system/files/156/BuildStock_TMY3_FIPS.zip
-def import_weather(weather_file=None, weather_path=None, weather_station=None, weather_metadata=None, **kwargs):
+def _epw_ground_mains_for_dates(epw_file, weather_index):
+    """Use OCHRE's existing annual EPW correlations on dated weather rows."""
+    epw_weather, _ = import_weather(
+        weather_file=epw_file,
+        start_time=dt.datetime(weather_index[0].year, 1, 1),
+    )
+    keys = pd.MultiIndex.from_arrays([weather_index.month, weather_index.day])
+    annual_keys = [epw_weather.index.month, epw_weather.index.day]
+    result = {}
+    for column in ('Mains Temperature (C)', 'Ground Temperature (C)'):
+        by_date = epw_weather[column].groupby(annual_keys).first()
+        values = by_date.reindex(keys)
+        if values.isna().any():
+            raise OCHREException(
+                f'EPW ground/mains profile has no calendar-day value for '
+                f'{weather_index[values.isna().to_numpy()][0].date()}.'
+            )
+        result[column] = values.to_numpy(dtype=float)
+    return result
+
+
+def import_weather(weather_file=None, weather_path=None, weather_station=None, weather_metadata=None,
+                   ground_mains_epw_file=None, **kwargs):
     # get weather station and weather file name
     if weather_file is not None and weather_station is not None:
         if weather_station not in weather_file:
@@ -144,17 +167,28 @@ def import_weather(weather_file=None, weather_path=None, weather_station=None, w
     if weather_metadata is not None:
         # Assumes OCHRE weather file format
         offset = weather_metadata.get('Offset')
-        df = load_csv(weather_file, sub_folder='Weather', index_col='Time', parse_dates=True)
-        df['month'] = df.index.month
-        df['day'] = df.index.day
-
-        # Set timezone if not already set
-        if df.index.tzinfo is None:
-            weather_timezone = weather_metadata.get('timezone')
-            if weather_timezone is None:
-                raise OCHREException('Timezone must be specified either in weather_metadata.')
+        df = load_csv(weather_file, sub_folder='Weather')
+        if 'Time' not in df:
+            raise OCHREException('Prepared weather CSV must contain a Time column.')
+        weather_timezone = weather_metadata.get('timezone')
+        if weather_timezone is None:
+            raise OCHREException('Timezone must be specified in weather_metadata.')
+        source_times = df.pop('Time')
+        if isinstance(weather_timezone, str):
+            # Mixed -04:00/-05:00 offsets must be parsed as instants before
+            # conversion to the local IANA timezone.
+            if not source_times.astype(str).str.contains(r'(?:Z|[+-]\d\d:\d\d)$').all():
+                raise OCHREException('Prepared weather timestamps must include an explicit UTC offset.')
+            df.index = pd.DatetimeIndex(pd.to_datetime(source_times, utc=True)).tz_convert(
+                ZoneInfo(weather_timezone)
+            )
+        else:
+            parsed = pd.DatetimeIndex(pd.to_datetime(source_times))
             tz = dt.timezone(dt.timedelta(hours=weather_timezone))
-            df = df.tz_localize(tz)
+            df.index = parsed.tz_localize(tz) if parsed.tz is None else parsed.tz_convert(tz)
+        if df.index.has_duplicates or not df.index.is_monotonic_increasing:
+            raise OCHREException('Prepared weather timestamps must be unique and ordered.')
+        df.index.name = 'Time'
 
         # check that lat/lon is in weather_metadata
         missing = [data for data in ['latitude', 'longitude'] if data not in weather_metadata]
@@ -215,7 +249,9 @@ def import_weather(weather_file=None, weather_path=None, weather_station=None, w
     })
 
     # Add water mains and ground temperature - annual data only!
-    if len(df.index.month.unique()) == 12:
+    if ground_mains_epw_file is not None:
+        df = df.assign(**_epw_ground_mains_for_dates(ground_mains_epw_file, df.index))
+    elif len(df.index.month.unique()) == 12:
         # Get annual/monthly temperature averages (in F)
         t_amb = pd.Series(convert(df['Ambient Dry Bulb (C)'].values, 'degC', 'degF'), index=df.index)
         t_amb_avg = float(t_amb.mean())
@@ -451,17 +487,26 @@ def resample_and_reindex(df, time_res, start_time=None, duration=None, interpola
     # use existing start/end times if not specified
     if start_time is None:
         start_time = init_start_time
+    start_time = pd.Timestamp(start_time)
     if duration is None:
         duration = (df.index[-1] + init_time_res) - start_time
-    end_time = start_time + duration
+    end_time = start_time + pd.Timedelta(duration)
 
     # set time zone based on start_time
     if df.index.tzinfo != start_time.tzinfo:
-        df = df.tz_localize(start_time.tzinfo)
+        if start_time.tzinfo is None:
+            # Preserve the legacy EPW/naive simulation path.
+            df = df.tz_localize(None)
+        elif df.index.tzinfo is None:
+            raise OCHREException('Naive schedule cannot be used with an aware simulation clock.')
+        else:
+            df = df.tz_convert(start_time.tzinfo)
 
     start_year = start_time.year
     end_year = (end_time - time_res).year
-    if end_year > start_year:
+    # A prepared schedule can already cover both years (e.g., the dwelling's
+    # post-weather schedule). Only annual source data needs to be repeated.
+    if end_year > start_year and df.index[-1] < end_time - time_res:
         # copy df for future years
         if len(df) % 8760 == 1:
             # remove last time step before duplicating annual
@@ -471,7 +516,8 @@ def resample_and_reindex(df, time_res, start_time=None, duration=None, interpola
 
         print(f'Simulation spans multiple years ({start_year}-{end_year}). Duplicating time series data.')
         df = pd.concat([df] * (end_year - start_year + 1), axis=0)
-        df.index = pd.date_range(init_start_time, periods=len(df), freq=init_time_res)
+        # Use the timezone-normalized index, not init_start_time captured above.
+        df.index = pd.date_range(df.index[0], periods=len(df), freq=init_time_res)
 
     # check if all data is available - extend by up to 2 time steps
     if df.index[0] <= start_time:
@@ -526,6 +572,26 @@ def resample_and_reindex(df, time_res, start_time=None, duration=None, interpola
     return df
 
 
+def _resample_annual_local_schedule(df, start_time, duration, time_res):
+    """Repeat an annual occupancy/setpoint profile by local wall-clock time."""
+    start_time = pd.Timestamp(start_time)
+    end_time = start_time + pd.Timedelta(duration)
+    times = pd.date_range(start_time, end_time, freq=time_res, inclusive='left')
+    wall_times = times.tz_localize(None)
+    reference_year = df.index[0].year
+    try:
+        reference_times = pd.DatetimeIndex([
+            timestamp.replace(year=reference_year) for timestamp in wall_times
+        ])
+    except ValueError as exc:
+        raise OCHREException('Annual occupancy schedule has no February 29 reference day.') from exc
+    if df.index.tz is not None:
+        raise OCHREException('Annual local occupancy source must use naive wall-clock timestamps.')
+    result = df.reindex(reference_times, method='ffill')
+    result.index = times.rename('Time')
+    return result
+
+
 def load_schedule(properties, schedule=None, time_zone=None, **house_args):
     # Load weather file and update Location properties
     df_weather, location = import_weather(**house_args)
@@ -540,8 +606,24 @@ def load_schedule(properties, schedule=None, time_zone=None, **house_args):
 
     # resample weather and occupancy schedules using simulation parameters
     weather_tz = df_weather.index.tzinfo
-    df_weather = resample_and_reindex(df_weather, **house_args)  # loses weather timezone info
-    df_occupancy = resample_and_reindex(df_occupancy, **house_args)
+    linear_weather = house_args.get('weather_interpolation', 'step') == 'linear'
+    if linear_weather:
+        # EPW-derived ground and mains schedules retain their existing daily or
+        # monthly step values; only atmospheric weather is interpolated.
+        epw_columns = [column for column in ('Mains Temperature (C)', 'Ground Temperature (C)')
+                       if column in df_weather]
+        df_epw = resample_and_reindex(df_weather[epw_columns], **house_args) if epw_columns else None
+        df_weather = resample_and_reindex(df_weather.drop(columns=epw_columns), interpolate=True, **house_args)
+        if df_epw is not None:
+            df_weather = df_weather.join(df_epw)
+    else:
+        df_weather = resample_and_reindex(df_weather, **house_args)
+    if pd.Timestamp(house_args['start_time']).tzinfo is not None:
+        df_occupancy = _resample_annual_local_schedule(
+            df_occupancy, house_args['start_time'], house_args['duration'], house_args['time_res']
+        )
+    else:
+        df_occupancy = resample_and_reindex(df_occupancy, **house_args)
 
     if schedule:
         df_modify = pd.DataFrame(schedule)
@@ -556,7 +638,7 @@ def load_schedule(properties, schedule=None, time_zone=None, **house_args):
 
         # Resample and reindex each modified dataframe
         if not df_weather_modify.empty:
-            df_weather_modify = resample_and_reindex(df_weather_modify, **house_args)
+            df_weather_modify = resample_and_reindex(df_weather_modify, interpolate=linear_weather, **house_args)
             df_weather.update(df_weather_modify)
         
         if not df_occupancy_modify.empty:
@@ -599,7 +681,8 @@ def load_schedule(properties, schedule=None, time_zone=None, **house_args):
             -7: 'US/Mountain',
             -8: 'US/Pacific',
         }
-        time_zone = pytz.timezone(us_dst_timezones[location['timezone']])
+        time_zone = pytz.timezone(location['timezone']) if isinstance(location['timezone'], str) else \
+            pytz.timezone(us_dst_timezones[location['timezone']])
     elif time_zone == 'noDST':
         # Use weather timezone offset to determine US timezone without daylight savings
         time_zone = dt.timezone(dt.timedelta(hours=location['timezone']))
@@ -608,6 +691,9 @@ def load_schedule(properties, schedule=None, time_zone=None, **house_args):
         time_zone = pytz.timezone(time_zone)
     elif time_zone is not None:
         raise OCHREException(f'Unknown time zone parameter: {time_zone}')
-    schedule.index = schedule.index.tz_localize(time_zone)
+    if schedule.index.tz is None:
+        schedule.index = schedule.index.tz_localize(time_zone)
+    elif time_zone is not None:
+        schedule.index = schedule.index.tz_convert(time_zone)
 
     return schedule, location

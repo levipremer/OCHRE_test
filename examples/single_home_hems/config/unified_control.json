@@ -1,0 +1,94 @@
+{
+  "defaults": {
+    "ev": {
+      "controller": "baseline",
+      "formulation": "convex",
+      "solver": "CLARABEL",
+      "solver_options": {},
+      "horizon_hours": 12,
+      "forecast_hours": 12,
+      "control_minutes": 15,
+      "forecast": {
+        "mode": "perfect",
+        "file": null,
+        "scenario_method": "tod_dow_state_hier_limit_persistence",
+        "scenario_count": 5,
+        "lookback_days": 30,
+        "knn_history_hours": 24,
+        "scenario_minutes": 15,
+        "prefix_control_intervals": 4
+      },
+      "enforce_cycle_limit": false,
+      "enforce_dwell_constraints": false,
+      "electricity_weight": 1,
+      "trip_shortfall_weight": 10000,
+      "persistence_weight": 0,
+      "dwell_on_minutes": 30,
+      "dwell_off_minutes": 30,
+      "max_charge_starts_24h": null,
+      "max_discharge_starts_24h": null,
+      "projection": "nearest",
+      "projection_tracking_weight": 1,
+      "projection_switch_weight": 0,
+      "projection_threshold": 0.5,
+      "enforce_terminal_soc": false,
+      "enforce_discharge_budget": false,
+      "discharge_budget_soc": 1,
+      "mip_relative_gap": 0.05,
+      "health_soc_weight": 1,
+      "health_soc_min": 0.2,
+      "health_soc_max": 0.8,
+      "comfort_soc_min": 0.2,
+      "health_weight": 1,
+      "comfort_weight": 0,
+      "enable_degradation": false,
+      "degradation_method": "rainflow",
+      "rainflow_relative_tolerance": 0.001,
+      "rainflow_absolute_tolerance": 1e-06,
+      "rainflow_max_iterations": 100
+    }
+  },
+  "homes": {
+    "home_01": {
+      "evs": {
+        "01A": {
+          "controller": "mpc",
+          "formulation": "milp",
+          "solver": "SCIPY",
+          "horizon_hours": 12,
+          "forecast_hours": 12,
+          "control_minutes": 15,
+          "forecast": {
+            "mode": "scenario"
+          },
+          "dwell_on_minutes": 60,
+          "dwell_off_minutes": 60,
+          "electricity_weight": 1,
+          "persistence_weight": 0,
+          "projection": "nearest",
+          "enforce_dwell_constraints": false,
+          "enforce_cycle_limit": false,
+          "health_soc_weight": 1000,
+          "health_soc_min": 0.2,
+          "health_soc_max": 0.8,
+          "comfort_soc_min": 0.4,
+          "enforce_terminal_soc": false,
+          "enforce_discharge_budget": false,
+          "discharge_budget_soc": 1,
+          "mip_relative_gap": 0.05,
+          "health_weight": 1,
+          "comfort_weight": 1000,
+          "enable_degradation": false,
+          "degradation_method": "rainflow",
+          "rainflow_relative_tolerance": 0.001,
+          "rainflow_absolute_tolerance": 1e-06,
+          "rainflow_max_iterations": 100
+        }
+      }
+    }
+  },
+  "_comments": [
+    "Opt-in EV comparison controls. Existing native thermal policies are identical across cases.",
+    "For existing thermal MPC use run_unified(..., thermal_controller_factory=...) with fresh controllers."
+  ]
+}
