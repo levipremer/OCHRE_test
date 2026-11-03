@@ -41,6 +41,7 @@ def train_state_space_predictor_group_lasso(
     auto_lambda_grid_points=30,
     group_lasso_scaling=None,
     min_max_passthrough_disturbance_indices=None,
+    current_only_disturbance_indices=None,
     lambda_selection_metric="validation_one_step_rmse",
     memory_selection_method="validation",
     allow_rank_deficient_refit=False,
@@ -48,7 +49,9 @@ def train_state_space_predictor_group_lasso(
     """
     Train the state-space predictor with group-LASSO disturbance selection.
 
-    Group LASSO is used only to select disturbances.  The returned model is the
+    Group LASSO is used only to select disturbances.  Disturbances listed in
+    ``current_only_disturbance_indices`` form singleton groups with no lagged
+    coefficients. The returned model is the
     unregularized refit using the selected memory, lambda, and disturbance set.
     Set ``allow_rank_deficient_refit`` to use a minimum-norm least-squares
     refit and effective-rank information criteria when selected columns are
@@ -84,6 +87,10 @@ def train_state_space_predictor_group_lasso(
             min_max_passthrough_disturbance_indices,
             nw,
         )
+    )
+    current_only_disturbance_indices = _validate_current_only_disturbance_indices(
+        current_only_disturbance_indices,
+        nw,
     )
     if lambda_selection_metric not in LAMBDA_SELECTION_METRICS:
         allowed = ", ".join(sorted(LAMBDA_SELECTION_METRICS))
@@ -123,6 +130,7 @@ def train_state_space_predictor_group_lasso(
                 min_max_passthrough_disturbance_indices=(
                     min_max_passthrough_disturbance_indices
                 ),
+                current_only_disturbance_indices=current_only_disturbance_indices,
                 lambda_selection_metric=lambda_selection_metric,
                 validation_segments=validation_segments,
                 auto_lambda_grid_points=auto_lambda_grid_points,
@@ -209,6 +217,7 @@ def train_state_space_predictor_group_lasso(
         "min_max_passthrough_disturbance_indices": (
             min_max_passthrough_disturbance_indices
         ),
+        "current_only_disturbance_indices": current_only_disturbance_indices,
         "lambda_selection_metric": best_fit["lambda_selection_metric"],
         "memory_selection_metric": memory_selection_metric,
         "memory_selection_method": memory_selection_method,
@@ -384,6 +393,21 @@ def _validate_passthrough_disturbance_indices(indices, nw):
     return sorted(set(validated))
 
 
+def _validate_current_only_disturbance_indices(indices, nw):
+    if indices is None:
+        return []
+
+    validated = []
+    for index in indices:
+        if not isinstance(index, (int, np.integer)) or not 0 <= int(index) < nw:
+            raise ValueError(
+                "current_only_disturbance_indices must contain zero-based "
+                "disturbance indices between 0 and nw - 1."
+            )
+        validated.append(int(index))
+    return sorted(set(validated))
+
+
 def relative_ic(ic_values, memory_candidates, pct_thresh=0.01):
     """
     Select memory using a relative downward-drop rule.
@@ -493,6 +517,7 @@ def _fit_fixed_memory_group_lasso(
     cvxpy_solver,
     scaling_method,
     min_max_passthrough_disturbance_indices,
+    current_only_disturbance_indices,
     lambda_selection_metric,
     validation_segments,
     auto_lambda_grid_points,
@@ -504,7 +529,9 @@ def _fit_fixed_memory_group_lasso(
     ny = blocks["ny"]
 
     regression_matrix = np.vstack([blocks["z1"], blocks["u1"], blocks["w1"]])
-    feature_info = _feature_info(m, nu, ny, nw)
+    feature_info = _feature_info(
+        m, nu, ny, nw, current_only_disturbance_indices
+    )
     feature_offset, feature_scale = _feature_transform_for_group_lasso(
         segments,
         m=m,
@@ -809,25 +836,36 @@ def _build_training_blocks(segments, m, h, burn_in):
     }
 
 
-def _feature_info(m, nu, ny, nw):
+def _feature_info(m, nu, ny, nw, current_only_disturbance_indices=()):
     nz = nu + nw + ny
     total_rows = m * nz + nu + nw
     disturbance_groups = {}
     grouped_rows = []
+    excluded_rows = []
+    current_only = set(current_only_disturbance_indices)
 
     for disturbance_index in range(nw):
         rows = []
         for lag in range(m):
-            rows.append(lag * nz + nu + disturbance_index)
+            lag_row = lag * nz + nu + disturbance_index
+            if disturbance_index in current_only:
+                excluded_rows.append(lag_row)
+            else:
+                rows.append(lag_row)
         rows.append(m * nz + nu + disturbance_index)
         disturbance_groups[f"Disturbance_{disturbance_index + 1}"] = rows
         grouped_rows.extend(rows)
 
     grouped_rows = set(grouped_rows)
-    always_keep_idx = [row for row in range(total_rows) if row not in grouped_rows]
+    excluded_rows = sorted(excluded_rows)
+    always_keep_idx = [
+        row for row in range(total_rows)
+        if row not in grouped_rows and row not in excluded_rows
+    ]
     return {
         "always_keep_idx": always_keep_idx,
         "disturbance_groups": disturbance_groups,
+        "excluded_rows": excluded_rows,
     }
 
 
@@ -878,6 +916,7 @@ def _solve_group_lasso(
             group_norm = np.linalg.norm(group, ord="fro")
             shrink = max(0.0, 1.0 - step * lambda_value / (group_norm + np.finfo(float).eps))
             theta[:, group_rows] = shrink * group
+        theta[:, feature_info["excluded_rows"]] = 0.0
 
         delta = np.linalg.norm(theta - previous, ord="fro")
         baseline = max(1.0, np.linalg.norm(previous, ord="fro"))
@@ -959,7 +998,11 @@ def _solve_group_lasso_cvxpy(
         cp.sum_squares(residual) / n_samples
         + float(lambda_value) * group_penalty
     )
-    problem = cp.Problem(objective)
+    constraints = (
+        [theta[:, feature_info["excluded_rows"]] == 0]
+        if feature_info["excluded_rows"] else []
+    )
+    problem = cp.Problem(objective, constraints)
     solver = _resolve_cvxpy_solver(cp, cvxpy_solver)
     if solver == "GUROBI":
         problem.solve(solver=cp.GUROBI, OutputFlag=0)
@@ -1017,11 +1060,16 @@ def _solve_group_lasso_cvxpy_path(
     group_penalty = 0
     for group_rows in feature_info["disturbance_groups"].values():
         group_penalty += cp.norm(theta[:, group_rows], "fro")
+    constraints = (
+        [theta[:, feature_info["excluded_rows"]] == 0]
+        if feature_info["excluded_rows"] else []
+    )
     problem = cp.Problem(
         cp.Minimize(
             cp.sum_squares(residual) / n_samples
             + lambda_parameter * group_penalty
-        )
+        ),
+        constraints,
     )
     solver = _resolve_cvxpy_solver(cp, cvxpy_solver)
     solutions = []

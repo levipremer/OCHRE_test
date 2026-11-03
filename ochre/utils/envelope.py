@@ -114,14 +114,17 @@ def calculate_plane_irradiance(df, tilt, panel_azimuth, window_data=None, albedo
 
 def calculate_solar_irradiance(weather, weather_timezone, location, boundaries, **house_args):
     # calculate solar angles, irradiance, other variables for solar calculations, using weather timezone
-    # df.index = df.index.tz_localize(weather_timezone)
-    time_index = weather.index.tz_localize(weather_timezone)
+    time_index = (
+        weather.index.tz_localize(weather_timezone)
+        if weather.index.tz is None else weather.index
+    )
     df = pvlib.solarposition.get_solarposition(time_index,
                                                latitude=location['latitude'],
                                                longitude=location['longitude'])
     df['dni_extraterrestrial'] = pvlib.irradiance.get_extra_radiation(time_index)
     df['airmass'] = pvlib.atmosphere.get_relative_airmass(df['apparent_zenith'].values)
-    df.index = df.index.tz_localize(None)
+    if weather.index.tz is None:
+        df.index = df.index.tz_localize(None)
     weather = weather.join(df)
 
     # add solar irradiance for all external boundaries (except raised floors)

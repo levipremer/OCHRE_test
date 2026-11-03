@@ -1,0 +1,100 @@
+{
+  "source": "MISO daily Day Ahead Market ExPost LMPs reports",
+  "node": "CIN.PSI",
+  "node_type": "Loadzone",
+  "value": "LMP",
+  "report_time_convention": "Hour ending in Eastern Standard Time (EST); HE 1 is local 00:00\u201301:00",
+  "local_timezone": "America/Indiana/Indianapolis",
+  "simulation_interval_local": "[2025-12-01T00:00:00-05:00, 2025-12-08T00:00:00-05:00)",
+  "additional_forecast_tail_market_date": "2025-12-08",
+  "row_count": 216,
+  "simulation_row_count": 168,
+  "retrieved_at_utc": "2026-10-23T02:50:15.102325+00:00",
+  "csv_sha256": "8ac0d59c9401d3081811cf9a6d212b6490e211c2db910e7274d8b0848eba732e",
+  "source_reports": [
+    {
+      "market_date": "2025-11-30",
+      "url": "https://docs.misoenergy.org/marketreports/20251130_da_expost_lmp.csv",
+      "sha256": "a70cfddd00789fff76f0a599ab9d875e7b60e8cc7d5dd18a140ba0f80d1b1b06",
+      "hour_count": 24,
+      "mean_lmp_usd_per_mwh": "39.16625",
+      "min_lmp_usd_per_mwh": "28.36",
+      "max_lmp_usd_per_mwh": "64.91"
+    },
+    {
+      "market_date": "2025-12-01",
+      "url": "https://docs.misoenergy.org/marketreports/20251201_da_expost_lmp.csv",
+      "sha256": "3b76ec51a8bf93a4ffbba46ed766855d5c23fd43ed5395cd41c442285501f39e",
+      "hour_count": 24,
+      "mean_lmp_usd_per_mwh": "69.9325",
+      "min_lmp_usd_per_mwh": "47.83",
+      "max_lmp_usd_per_mwh": "103.12"
+    },
+    {
+      "market_date": "2025-12-02",
+      "url": "https://docs.misoenergy.org/marketreports/20251202_da_expost_lmp.csv",
+      "sha256": "9fd3777e32a274d278b15f329cfdb993d98903e9fba4b2b3e270c49ffdf3adb8",
+      "hour_count": 24,
+      "mean_lmp_usd_per_mwh": "64.96",
+      "min_lmp_usd_per_mwh": "45.85",
+      "max_lmp_usd_per_mwh": "103.2"
+    },
+    {
+      "market_date": "2025-12-03",
+      "url": "https://docs.misoenergy.org/marketreports/20251203_da_expost_lmp.csv",
+      "sha256": "28edb6ac6dc14b4c37bd9734dfb803fba3e053c7385098f5f146a294df94e4ee",
+      "hour_count": 24,
+      "mean_lmp_usd_per_mwh": "54.0075",
+      "min_lmp_usd_per_mwh": "35.41",
+      "max_lmp_usd_per_mwh": "85.52"
+    },
+    {
+      "market_date": "2025-12-04",
+      "url": "https://docs.misoenergy.org/marketreports/20251204_da_expost_lmp.csv",
+      "sha256": "93d82bb26b8ce0ce7844a42e24404e8a699116041a105dce8fc4d9a3b0d46bc0",
+      "hour_count": 24,
+      "mean_lmp_usd_per_mwh": "63.81708333333333333333333333",
+      "min_lmp_usd_per_mwh": "43.17",
+      "max_lmp_usd_per_mwh": "101.27"
+    },
+    {
+      "market_date": "2025-12-05",
+      "url": "https://docs.misoenergy.org/marketreports/20251205_da_expost_lmp.csv",
+      "sha256": "2ead4f110c7259824f288e6aa98d384b5ad459ec1d4ccb3338ce930d5773a0ab",
+      "hour_count": 24,
+      "mean_lmp_usd_per_mwh": "54.34833333333333333333333333",
+      "min_lmp_usd_per_mwh": "38.98",
+      "max_lmp_usd_per_mwh": "89.45"
+    },
+    {
+      "market_date": "2025-12-06",
+      "url": "https://docs.misoenergy.org/marketreports/20251206_da_expost_lmp.csv",
+      "sha256": "ce61baaaca88c74f21271b87f447462dd89bb843335ca2794bfbd626564cff1d",
+      "hour_count": 24,
+      "mean_lmp_usd_per_mwh": "54.42916666666666666666666667",
+      "min_lmp_usd_per_mwh": "42.69",
+      "max_lmp_usd_per_mwh": "71.68"
+    },
+    {
+      "market_date": "2025-12-07",
+      "url": "https://docs.misoenergy.org/marketreports/20251207_da_expost_lmp.csv",
+      "sha256": "f1a24b58b26eb523607fa32a8fc8e550918ddf0ac21fff5556e8b5f7ca6c1483",
+      "hour_count": 24,
+      "mean_lmp_usd_per_mwh": "50.31916666666666666666666667",
+      "min_lmp_usd_per_mwh": "39.17",
+      "max_lmp_usd_per_mwh": "75.64"
+    },
+    {
+      "market_date": "2025-12-08",
+      "url": "https://docs.misoenergy.org/marketreports/20251208_da_expost_lmp.csv",
+      "sha256": "78d348e1e964fcc8b38cd7ee098c1759a94043b5acf05a9c99dd4463d6ff9861",
+      "hour_count": 24,
+      "mean_lmp_usd_per_mwh": "72.37666666666666666666666667",
+      "min_lmp_usd_per_mwh": "53.88",
+      "max_lmp_usd_per_mwh": "110.48"
+    }
+  ],
+  "note": "Unnormalized wholesale LMP only. No retail adder, daily centering, or controller rate formulation is applied.",
+  "additional_warmup_market_date": "2025-11-30",
+  "source_coverage_interval_local": "[2025-11-30T00:00:00-05:00, 2025-12-09T00:00:00-05:00)"
+}

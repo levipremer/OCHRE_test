@@ -39,6 +39,15 @@ class HEMSController:
         """Return the active electricity price in dollars per kWh."""
         return self.price_schedule.price_at(timestamp)
 
+    def electricity_price_as_known_at(
+        self, issued_at: pd.Timestamp, target: pd.Timestamp,
+    ) -> float:
+        """Return the tariff price announced by the forecast issue time."""
+        callback = getattr(self.price_schedule, "forecast_callback", None)
+        if callback is None:
+            return self.price_schedule.price_at(target)
+        return callback(issued_at)(target)
+
     def controls_for_step(
         self,
         timestamp: pd.Timestamp,

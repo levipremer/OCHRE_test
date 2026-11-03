@@ -73,6 +73,7 @@ def isolated_runner():
         "WaterHeaterPredictiveController": water_heater,
         "HVACPredictiveController": MagicMock(), "EVPredictiveController": MagicMock(),
         "load_configuration": MagicMock(return_value=config),
+        "load_weather_forecast_archive": MagicMock(return_value=None),
         "select_home": MagicMock(return_value=home),
         "replace": MagicMock(return_value=config),
         "WaterHeaterSensorLayout": sensors,
@@ -110,19 +111,33 @@ class SingleHomeWaterHeaterCliTests(unittest.TestCase):
         self.assertEqual(options["scenario_method"], "daily_budget_high")
         self.assertEqual(options["horizon"], dt.timedelta(hours=12))
         simulation = namespace["SingleHomeHEMSSimulation"].call_args.kwargs
+        namespace["load_weather_forecast_archive"].assert_called_once_with(
+            namespace["load_configuration"].return_value, "perfect", None
+        )
+        self.assertIsNone(simulation["weather_archive"])
         self.assertEqual(simulation["water_draw_file"].name, "water_flow_dchouse_l_per_min.csv")
         self.assertEqual(simulation["water_draw_start"], dt.datetime(2025, 11, 6))
         self.assertFalse(simulation["save_optimizer_plan_figures"])
 
     def test_scenario_cli_rejects_invalid_configuration(self) -> None:
         for arguments in (
-            ("--forecast-type", "scenario", "--water-heater-horizon-hours", "6"),
+            ("--forecast-type", "scenario", "--water-heater-horizon-hours", "6.1"),
             ("--water-heater-horizon-hours", "0"),
             ("--water-draw-start", "2025-11-06"),
             ("--water-heater-solver", "CLARABEL", "--water-heater-optimization", "milp"),
         ):
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):
                 mocked_main(*arguments)
+
+    def test_scenario_cli_accepts_study_method_and_horizon(self) -> None:
+        namespace, args, _ = mocked_main(
+            "--forecast-type", "scenario", "--scenario-method", "tail_anchored_k7_rf_1",
+            "--water-heater-horizon-hours", "6",
+        )
+        self.assertEqual(args.water_heater_horizon_hours, 6.0)
+        options = namespace["WaterHeaterPredictiveController"].call_args.kwargs
+        self.assertEqual(options["scenario_method"], "tail_anchored_k7_rf_1")
+        self.assertEqual(options["horizon"], dt.timedelta(hours=6))
 
     def test_forecast_defaults_preserve_perfect_and_separate_output_names(self) -> None:
         namespace = isolated_runner()

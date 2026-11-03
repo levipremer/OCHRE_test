@@ -28,6 +28,27 @@ DEFAULT_RC_OLD_MODEL_PATH = DEFAULT_RC_MODEL_PATH.parent / "water_heater_rc_mode
 DEFAULT_RC_STRATIFIED_MODEL_PATH = DEFAULT_RC_MODEL_PATH.parent / "water_heater_rc_model_stratified"
 
 
+@dataclass(frozen=True)
+class PreparedWaterHeaterScenarioStep:
+    """One built scenario problem, ready for a standalone or joint solve."""
+
+    timestamp: pd.Timestamp
+    problem: cp.Problem
+    heat: cp.Expression
+    electric_power_kw: cp.Expression
+    objective_components: dict[str, cp.Expression]
+    initial_state: np.ndarray
+    prices: np.ndarray
+    disturbances: np.ndarray
+    model: Mapping[str, Any]
+    scenario_count: int
+    preparation_duration_s: float
+    optimization_kind: str
+    # The RC model scales selected draws by the tempered-water mixing ratio.
+    # Retain the original selected paths for decision-input audit only.
+    source_draws_l_per_min: np.ndarray | None = None
+
+
 @dataclass
 class WaterHeaterPredictiveController:
     """Balance water-heating cost, comfort, and average tank temperature.
@@ -70,6 +91,14 @@ class WaterHeaterPredictiveController:
     legionella_cooldown_memory: pd.Timedelta = pd.Timedelta(hours=6)
     legionella_cooldown_band_c: float = 6.0
     persistence_weight: float = 0.001
+    # One-time expected terminal shortfall for MILP scenario MPC only.
+    terminal_weight: float = 0.0
+    # Optional soft rolling start budget, independent of the historical hard
+    # horizon-wide cycle cap above. Starts are counted at interval starts.
+    rolling_start_limit_24h: int | None = None
+    rolling_start_slack_weight: float = 0.0
+    # One-time endpoint penalty for retaining less than one available start.
+    terminal_cycle_reserve_weight: float = 0.0
     water_use_peak_l_per_min: float = 0.75
     water_use_two_hour_volume_l: float = 18.0
 
@@ -86,6 +115,16 @@ class WaterHeaterPredictiveController:
         default=None, init=False, repr=False
     )
     _recent_off_times: list[pd.Timestamp] = field(
+        default_factory=list, init=False, repr=False
+    )
+    _observed_start_times: list[pd.Timestamp] = field(
+        default_factory=list, init=False, repr=False
+    )
+    _last_start_observed_on: int | None = field(default=None, init=False, repr=False)
+    _last_start_observed_time: pd.Timestamp | None = field(
+        default=None, init=False, repr=False
+    )
+    _rolling_cycle_diagnostics_history: list[dict[str, Any]] = field(
         default_factory=list, init=False, repr=False
     )
     solve_durations_s: dict[str, list[float]] = field(
@@ -121,10 +160,33 @@ class WaterHeaterPredictiveController:
         if self.optimization_kind not in {"convex", "milp"}:
             raise ValueError("optimization_kind must be 'convex' or 'milp'")
         if self.forecast_type == "scenario" and (
-            self.horizon != pd.Timedelta(hours=12)
+            self.horizon <= pd.Timedelta(0)
             or self.model_timestep != pd.Timedelta(minutes=15)
+            or self.horizon % self.model_timestep != pd.Timedelta(0)
         ):
-            raise ValueError("Scenario control requires a 12-hour, 15-minute forecast")
+            raise ValueError("Scenario control requires a positive horizon in 15-minute steps")
+        if not np.isfinite(self.terminal_weight) or self.terminal_weight < 0:
+            raise ValueError("terminal_weight must be finite and nonnegative")
+        if self.terminal_weight and (
+            self.forecast_type != "scenario" or self.optimization_kind != "milp"
+        ):
+            raise ValueError("terminal_weight applies only to MILP scenario control")
+        if self.rolling_start_limit_24h is not None and (
+            isinstance(self.rolling_start_limit_24h, (bool, np.bool_))
+            or not isinstance(self.rolling_start_limit_24h, (int, np.integer))
+            or self.rolling_start_limit_24h < 1
+        ):
+            raise ValueError("rolling_start_limit_24h must be a positive integer or None")
+        for name in ("rolling_start_slack_weight", "terminal_cycle_reserve_weight"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if self.rolling_start_limit_24h is None and (
+            self.rolling_start_slack_weight or self.terminal_cycle_reserve_weight
+        ):
+            raise ValueError("Rolling cycle weights require rolling_start_limit_24h")
+        if self.rolling_start_limit_24h is not None and self.optimization_kind != "milp":
+            raise ValueError("The rolling start budget applies only to MILP control")
         self.legionella_cooldown_memory = pd.Timedelta(self.legionella_cooldown_memory)
         if (
             pd.isna(self.legionella_cooldown_memory)
@@ -146,6 +208,16 @@ class WaterHeaterPredictiveController:
     def objective_component_history(self) -> pd.DataFrame:
         """Return weighted objective terms from every successful solve."""
         return pd.DataFrame(self._objective_component_history)
+
+    @property
+    def observed_start_times(self) -> tuple[pd.Timestamp, ...]:
+        """Return observed OFF-to-ON events retained from the latest 24 hours."""
+        return tuple(self._observed_start_times)
+
+    @property
+    def rolling_cycle_diagnostics_history(self) -> pd.DataFrame:
+        """Return per-scenario planned rolling counts and required cycle slack."""
+        return pd.DataFrame(self._rolling_cycle_diagnostics_history)
 
     @property
     def solve_history(self) -> pd.DataFrame:
@@ -172,6 +244,15 @@ class WaterHeaterPredictiveController:
         """Return the current setpoint from a receding-horizon optimization."""
         if previous_status is None:
             return {}
+        if self.forecast_type == "scenario" and self.optimization_kind == "milp":
+            prepared = self.prepare_milp_scenario_step(
+                timestamp, previous_status, current_schedule, forecast,
+            )
+            if prepared is None:
+                if self._model is None:
+                    return {}
+                return self._setpoint_control()
+            return self._solve_prepared_scenario_step(prepared)
         prior_on = self._observe_heat_pump(timestamp, previous_status)
         nominal_capacity_w = previous_status.get(
             f"{self.equipment_name} Nominal Heat Pump Capacity (W)"
@@ -282,7 +363,8 @@ class WaterHeaterPredictiveController:
                 duration = time.perf_counter() - solve_start
                 self.solve_durations_s["convex"].append(duration)
                 self._record_solve_attempt(
-                    timestamp, "convex", duration, "solver_error", False
+                    timestamp, "convex", duration, "solver_error", False,
+                    problem=problem,
                 )
                 return self._setpoint_control()
             duration = time.perf_counter() - solve_start
@@ -292,7 +374,8 @@ class WaterHeaterPredictiveController:
                 and heat.value is not None
             )
             self._record_solve_attempt(
-                timestamp, "convex", duration, str(problem.status), successful
+                timestamp, "convex", duration, str(problem.status), successful,
+                problem=problem, incumbent_available=heat.value is not None,
             )
             if not successful:
                 return self._setpoint_control()
@@ -332,6 +415,7 @@ class WaterHeaterPredictiveController:
                 prior_on=prior_on,
                 recent_cycles=min(1, len(self._recent_off_times)),
                 previous_heat_kw=delivered_heat,
+                prediction_start=timestamp,
                 prior_dwell_steps=self._remaining_dwell_steps(
                     timestamp, prior_on
                 ),
@@ -354,7 +438,8 @@ class WaterHeaterPredictiveController:
                 duration = time.perf_counter() - solve_start
                 self.solve_durations_s["milp"].append(duration)
                 self._record_solve_attempt(
-                    timestamp, "milp", duration, "solver_error", False
+                    timestamp, "milp", duration, "solver_error", False,
+                    problem=problem,
                 )
                 return self._setpoint_control()
             duration = time.perf_counter() - solve_start
@@ -365,7 +450,8 @@ class WaterHeaterPredictiveController:
                 and heat.value is not None
             )
             self._record_solve_attempt(
-                timestamp, "milp", duration, str(problem.status), successful
+                timestamp, "milp", duration, str(problem.status), successful,
+                problem=problem, incumbent_available=heat.value is not None,
             )
             if not successful:
                 return self._setpoint_control()
@@ -374,6 +460,7 @@ class WaterHeaterPredictiveController:
             self._record_optimization_plan(
                 timestamp, initial_state, heat.value, prices, disturbances, model
             )
+            self._record_rolling_cycle_diagnostics(timestamp, heat.value, prior_on)
             self._last_setpoint = (
                 self.maximum_setpoint_c
                 if float(heat.value[0]) > 0.1
@@ -383,6 +470,55 @@ class WaterHeaterPredictiveController:
             self._last_decision_time = timestamp
             return self._setpoint_control()
 
+
+    def prepare_milp_scenario_step(
+        self,
+        timestamp: pd.Timestamp,
+        previous_status: Mapping[str, Any] | None,
+        current_schedule: Mapping[str, Any],
+        forecast: Forecast,
+    ) -> PreparedWaterHeaterScenarioStep | None:
+        """Observe the plant and build the existing MILP scenario problem.
+
+        Call this at every plant step so observed cycle and temperature memory
+        remains current. It returns a problem only on an eligible MPC boundary.
+        """
+        if self.forecast_type != "scenario" or self.optimization_kind != "milp":
+            raise ValueError("MILP scenario preparation requires MILP scenario control")
+        if previous_status is None:
+            return None
+        prior_on = self._observe_heat_pump(timestamp, previous_status)
+        nominal_capacity_w = previous_status.get(
+            f"{self.equipment_name} Nominal Heat Pump Capacity (W)"
+        )
+        if nominal_capacity_w is not None:
+            self.nominal_hp_capacity_kw = float(nominal_capacity_w) / 1000
+        model = self._load_model()
+        if model is None:
+            return None
+        measurement = self._measurement(previous_status, model["output_names"])
+        if measurement is None:
+            return None
+        self._observe_legionella_temperature(timestamp, measurement)
+        if (
+            self._last_decision_time is not None
+            and timestamp - self._last_decision_time < self.model_timestep
+        ):
+            return None
+        if timestamp != timestamp.floor(self.model_timestep):
+            return None
+        return self._prepare_scenario_problem(
+            timestamp, previous_status, current_schedule, forecast,
+            model, measurement, prior_on,
+        )
+
+    def held_controls_for_step(self) -> dict[str, dict[str, Any]]:
+        """Return the last water-heater command without starting another solve."""
+        return self._setpoint_control()
+
+    def held_controls(self) -> dict[str, dict[str, Any]]:
+        """Compatibility alias for existing combined-controller call sites."""
+        return self.held_controls_for_step()
 
     def _controls_for_scenarios(
         self,
@@ -395,12 +531,31 @@ class WaterHeaterPredictiveController:
         prior_on: int | None,
     ) -> dict[str, dict[str, Any]]:
         """Solve historical water-use paths without consulting future real draws."""
+        prepared = self._prepare_scenario_problem(
+            timestamp, previous_status, current_schedule, forecast,
+            model, measurement, prior_on,
+        )
+        if prepared is None:
+            return self._setpoint_control()
+        return self._solve_prepared_scenario_step(prepared)
+
+    def _prepare_scenario_problem(
+        self,
+        timestamp: pd.Timestamp,
+        previous_status: Mapping[str, Any],
+        current_schedule: Mapping[str, Any],
+        forecast: Forecast,
+        model: Mapping[str, Any],
+        measurement: np.ndarray,
+        prior_on: int | None,
+    ) -> PreparedWaterHeaterScenarioStep | None:
+        """Prepare the unchanged single-device scenario formulation."""
         preparation_start = time.perf_counter()
         provider = forecast.water_scenarios
         if provider is None:
             raise ValueError("Scenario control requires a water-scenario forecast provider")
         if self.optimization_kind == "milp" and prior_on is None:
-            return self._setpoint_control()
+            return None
         scenarios = provider.scenarios_at(timestamp)
         draws = np.asarray(scenarios.values, dtype=float)
         index = self._planning_index(timestamp, forecast)
@@ -410,7 +565,9 @@ class WaterHeaterPredictiveController:
             or len(index) != steps or not np.isfinite(draws).all()
             or (draws < 0).any()
         ):
-            raise ValueError("Scenario control requires complete nonnegative 48-step paths")
+            raise ValueError(
+                f"Scenario control requires complete nonnegative {steps}-step paths"
+            )
         count = draws.shape[0]
         self._scenario_diagnostics_history.append({
             "timestamp": pd.Timestamp(timestamp),
@@ -436,13 +593,13 @@ class WaterHeaterPredictiveController:
                 values.append(np.broadcast_to(mains, draws.shape))
             elif name == "water_heater_tank_ambient_temperature_c":
                 if ambient is None:
-                    return self._setpoint_control()
+                    return None
                 values.append(np.full(draws.shape, float(ambient)))
             else:
                 raise ValueError(f"Unsupported water-heater disturbance: {name}")
         disturbances = np.stack(values, axis=1)
         if not np.isfinite(disturbances).all():
-            return self._setpoint_control()
+            return None
         if self.model_kind == "rc":
             mains = disturbances[:, 1, :]
             target = model["tempered_draw_temperature_c"]
@@ -465,14 +622,14 @@ class WaterHeaterPredictiveController:
                 & (forecast.data.index < timestamp), "Water Heating (L/min)"
             ]
             if past.empty or past.isna().any():
-                return self._setpoint_control()
+                return None
             observed[draw_position] = float(past.mean())
             self._update_history(delivered_heat, observed, measurement, model["m"])
             initial_state = self._lifted_state(model["m"])
 
         prices = self._forecast_prices(timestamp, forecast, steps)
         if prices is None:
-            return self._setpoint_control()
+            return None
         draw_indicators = self._scenario_legionella_indicators(timestamp, forecast, draws)
         cooldown = self._forecast_legionella_cooldown_mask(
             timestamp, measurement, disturbances[0], model
@@ -489,9 +646,29 @@ class WaterHeaterPredictiveController:
             problem, heat, _ = self.optimization_problem_milp_scenario(
                 initial_state, prices, disturbances, model,
                 prior_on=prior_on, recent_cycles=min(1, len(self._recent_off_times)),
+                prediction_start=timestamp,
                 prior_dwell_steps=self._remaining_dwell_steps(timestamp, prior_on),
                 **options,
             )
+        cop = model["rc"].cop if self.model_kind == "rc" else self.cop
+        return PreparedWaterHeaterScenarioStep(
+            timestamp=pd.Timestamp(timestamp), problem=problem, heat=heat,
+            electric_power_kw=heat / cop,
+            objective_components=dict(self._objective_component_expressions),
+            initial_state=initial_state, prices=prices,
+            disturbances=disturbances, model=model, scenario_count=count,
+            preparation_duration_s=time.perf_counter() - preparation_start,
+            optimization_kind=self.optimization_kind,
+            source_draws_l_per_min=draws.copy(),
+        )
+
+    def _solve_prepared_scenario_step(
+        self, prepared: PreparedWaterHeaterScenarioStep,
+    ) -> dict[str, dict[str, Any]]:
+        """Solve one prepared scenario problem in standalone operation."""
+        timestamp = prepared.timestamp
+        problem = prepared.problem
+        heat = prepared.heat
         start = time.perf_counter()
         try:
             with warnings.catch_warnings():
@@ -500,30 +677,64 @@ class WaterHeaterPredictiveController:
                 problem.solve(solver=self.solver, **dict(self.solver_options))
             status = str(problem.status)
             accepted = {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}
-            if self.optimization_kind == "milp":
+            if prepared.optimization_kind == "milp":
                 accepted.add(cp.USER_LIMIT)
             successful = problem.status in accepted and heat.value is not None
         except cp.error.SolverError:
             status, successful = "solver_error", False
         duration = time.perf_counter() - start
-        self.solve_durations_s[self.optimization_kind].append(duration)
-        self._record_solve_attempt(timestamp, self.optimization_kind, duration, status, successful)
+        self.solve_durations_s[prepared.optimization_kind].append(duration)
+        self._record_solve_attempt(
+            timestamp, prepared.optimization_kind, duration, status, successful,
+            problem=problem, incumbent_available=heat.value is not None,
+        )
         self._solve_history[-1].update(
-            forecast_type="scenario", scenario_count=count,
-            preparation_duration_s=start - preparation_start,
+            forecast_type="scenario", scenario_count=prepared.scenario_count,
+            preparation_duration_s=prepared.preparation_duration_s,
         )
         if not successful:
             return self._setpoint_control()
-        self._record_objective_components(timestamp, problem)
-        self._record_scenario_optimization_plan(
-            timestamp, initial_state, heat.value, prices, disturbances, model
+        if prepared.optimization_kind == "milp":
+            return self.apply_milp_scenario_solution(prepared)
+        self._record_objective_components(
+            timestamp, problem, prepared.objective_components,
         )
-        threshold = 0.01 if self.optimization_kind == "convex" and self.persistence_weight >= 0 else 0.1
+        self._record_scenario_optimization_plan(
+            timestamp, prepared.initial_state, heat.value, prepared.prices,
+            prepared.disturbances, prepared.model,
+        )
+        threshold = 0.01 if self.persistence_weight >= 0 else 0.1
         self._last_setpoint = (
             self.maximum_setpoint_c if float(heat.value[0, 0]) > threshold
             else self.minimum_setpoint_c
         )
         self._last_decision_time = timestamp
+        return self._setpoint_control()
+
+    def apply_milp_scenario_solution(
+        self, prepared: PreparedWaterHeaterScenarioStep,
+    ) -> dict[str, dict[str, Any]]:
+        """Record a solved MILP scenario plan and apply its shared first heat."""
+        if prepared.optimization_kind != "milp":
+            raise ValueError("Expected a prepared MILP scenario problem")
+        heat_value = prepared.heat.value
+        if heat_value is None:
+            raise ValueError("Prepared MILP scenario problem has no heat solution")
+        self._record_objective_components(
+            prepared.timestamp, prepared.problem, prepared.objective_components,
+        )
+        self._record_scenario_optimization_plan(
+            prepared.timestamp, prepared.initial_state, heat_value,
+            prepared.prices, prepared.disturbances, prepared.model,
+        )
+        self._record_rolling_cycle_diagnostics(
+            prepared.timestamp, heat_value, self._last_observed_on,
+        )
+        self._last_setpoint = (
+            self.maximum_setpoint_c if float(heat_value[0, 0]) > 0.1
+            else self.minimum_setpoint_c
+        )
+        self._last_decision_time = prepared.timestamp
         return self._setpoint_control()
 
     def _scenario_legionella_indicators(
@@ -707,18 +918,27 @@ class WaterHeaterPredictiveController:
         self,
         timestamp: pd.Timestamp,
         problem: cp.Problem,
+        expressions: Mapping[str, cp.Expression] | None = None,
     ) -> None:
-        """Record the four weighted terms making up one solved MPC objective."""
-        if not self._objective_component_expressions:
+        """Record the weighted terms making up one solved MPC objective."""
+        components = (
+            self._objective_component_expressions
+            if expressions is None else expressions
+        )
+        if not components:
             return
         values = {
             name: float(np.asarray(expression.value).squeeze())
-            for name, expression in self._objective_component_expressions.items()
+            for name, expression in components.items()
         }
         if not all(np.isfinite(value) for value in values.values()):
             raise RuntimeError("Solved convex objective contains a non-finite term")
         component_sum = float(sum(values.values()))
-        scalar_objective = float(problem.value)
+        # A joint HEMS solve uses these expressions without solving this child
+        # cp.Problem separately. Its own objective is still the component sum.
+        scalar_objective = (
+            component_sum if problem.value is None else float(problem.value)
+        )
         self._objective_component_history.append(
             {
                 "timestamp": pd.Timestamp(timestamp),
@@ -736,15 +956,34 @@ class WaterHeaterPredictiveController:
         duration_s: float,
         status: str,
         successful: bool,
+        *,
+        problem: cp.Problem | None = None,
+        incumbent_available: bool | None = None,
     ) -> None:
         """Record one solver attempt, including failures that trigger fallback."""
+        solver_stats = getattr(problem, "solver_stats", None)
+        solver_time = None if solver_stats is None else solver_stats.solve_time
+        raw_status = None
+        if solver_stats is not None and str(self.solver).upper() == "GUROBI":
+            gurobi_model = solver_stats.extra_stats
+            if gurobi_model is not None:
+                raw_status = int(gurobi_model.Status)
+        if incumbent_available is None:
+            incumbent_available = successful
         self._solve_history.append(
             {
                 "timestamp": pd.Timestamp(timestamp),
                 "optimization_kind": optimization_kind,
                 "duration_s": float(duration_s),
+                "solver_time_s": None if solver_time is None else float(solver_time),
                 "status": status,
+                "solver_status_code": raw_status,
+                # Gurobi status 9 is TIME_LIMIT, even when CVXPY relabels a
+                # no-incumbent solve as infeasible_inaccurate.
+                "time_limit_hit": raw_status == 9,
+                "incumbent_available": bool(incumbent_available),
                 "successful": bool(successful),
+                "solve_failed": not bool(successful),
             }
         )
 
@@ -761,6 +1000,7 @@ class WaterHeaterPredictiveController:
         recent_cycles: int,
         previous_heat_kw: float,
         prior_dwell_steps: int = 0,
+        prediction_start: pd.Timestamp | None = None,
     ) -> tuple[cp.Problem, cp.Variable, cp.Expression]:
         """Build the state-space MPC problem and return it with its heat input.
 
@@ -815,7 +1055,10 @@ class WaterHeaterPredictiveController:
             heat == heat_limit*heat_state,
             avg_weighted_temperature <= self.maximum_setpoint_c
         ]
-        track_transitions = self.enforce_cycle_limit or self.enforce_dwell_constraints
+        track_transitions = (
+            self.enforce_cycle_limit or self.enforce_dwell_constraints
+            or self.rolling_start_limit_24h is not None
+        )
         heat_on = heat_off = None
         if track_transitions:
             heat_off = cp.Variable(steps, boolean=True)
@@ -865,6 +1108,36 @@ class WaterHeaterPredictiveController:
                 ])
         timestep_hours = self.model_timestep.total_seconds() / 3600
 
+        cycle_components: dict[str, cp.Expression] = {}
+        if self.rolling_start_limit_24h is not None:
+            if prediction_start is None or pd.isna(pd.Timestamp(prediction_start)):
+                raise ValueError("The rolling start budget requires prediction_start")
+            assert heat_on is not None
+            starts_at = pd.date_range(
+                pd.Timestamp(prediction_start), periods=steps, freq=self.model_timestep,
+            )
+            slack = cp.Variable(steps, nonneg=True, name="water_heater_cycle_slack")
+            for step, time_at in enumerate(starts_at):
+                left = time_at - pd.Timedelta(hours=24)
+                observed = sum(left < event <= starts_at[0] for event in self._observed_start_times)
+                retained = np.flatnonzero((starts_at > left) & (starts_at <= time_at))
+                constraints.append(
+                    observed + cp.sum(heat_on[retained])
+                    <= self.rolling_start_limit_24h + slack[step]
+                )
+            cycle_components["cycle_slack_objective_cost"] = (
+                self.rolling_start_slack_weight * timestep_hours / steps * cp.sum(slack)
+            )
+            endpoint = starts_at[0] + steps * self.model_timestep
+            left = endpoint - pd.Timedelta(hours=24)
+            observed = sum(left < event <= starts_at[0] for event in self._observed_start_times)
+            retained = np.flatnonzero(starts_at > left)
+            endpoint_starts = observed + cp.sum(heat_on[retained])
+            cycle_components["terminal_cycle_reserve_objective_cost"] = (
+                self.terminal_cycle_reserve_weight
+                * cp.pos(endpoint_starts - (self.rolling_start_limit_24h - 1))
+            )
+
         if self.persistence_weight:
             heat_variation = cp.abs(heat[0] - previous_heat_kw)
             if steps > 1:
@@ -894,12 +1167,13 @@ class WaterHeaterPredictiveController:
             "comfort_objective_cost": comfort_cost,
             "legionella_objective_cost": legionella_cost,
             "persistence_objective_cost": persistence_cost,
+            **cycle_components,
         }
         return (
             cp.Problem(
                 cp.Minimize(
                     electricity_cost + comfort_cost + legionella_cost
-                    + persistence_cost
+                    + persistence_cost + sum(cycle_components.values())
                 ),
                 constraints,
             ),
@@ -920,6 +1194,7 @@ class WaterHeaterPredictiveController:
         recent_cycles: int,
         previous_heat_kw: float,
         prior_dwell_steps: int = 0,
+        prediction_start: pd.Timestamp | None = None,
     ) -> tuple[cp.Problem, cp.Expression, cp.Expression]:
         """Apply the deterministic MILP constraints to every water-use path."""
         problem, heat, temperatures = build_scenario_problem(
@@ -930,6 +1205,7 @@ class WaterHeaterPredictiveController:
             prior_on=prior_on,
             recent_cycles=recent_cycles,
             prior_dwell_steps=prior_dwell_steps,
+            prediction_start=prediction_start,
         )
         assert temperatures is not None
         return problem, heat, temperatures
@@ -1012,10 +1288,94 @@ class WaterHeaterPredictiveController:
             raise ValueError("State-space control requires a positive nominal heat-pump capacity")
         return capacity
 
+    def _observed_heat_pump_on(self, previous_status: Mapping[str, Any]) -> int | None:
+        mode = previous_status.get(f"{self.equipment_name} Mode")
+        if mode == "Heat Pump On":
+            return 1
+        if mode in {"Off", "Upper On", "Lower On"}:
+            return 0
+        on_fraction = previous_status.get(f"{self.equipment_name} Heat Pump On Fraction (-)")
+        if on_fraction is None or not np.isfinite(on_fraction):
+            return None
+        return int(float(on_fraction) > 0)
+
+    def observe_start_history(
+        self, timestamp: pd.Timestamp, previous_status: Mapping[str, Any],
+    ) -> int | None:
+        """Observe a completed plant sample without building or solving an MPC.
+
+        Use during native warm-up as well as normal operation. OCHRE's ``Time``
+        identifies the completed sample's interval start; a controller issue
+        may occur one plant step later. The first observed ON state establishes
+        state only, because its start time is unknown.
+        """
+        on = self._observed_heat_pump_on(previous_status)
+        if on is None:
+            return None
+        try:
+            observed_at = pd.Timestamp(previous_status.get("Time"))
+        except (TypeError, ValueError):
+            observed_at = pd.NaT
+        if pd.isna(observed_at):
+            observed_at = pd.Timestamp(timestamp)
+        if pd.isna(observed_at):
+            raise ValueError("A water-heater observation requires a valid timestamp")
+        if (
+            self._last_start_observed_time is not None
+            and observed_at <= self._last_start_observed_time
+        ):
+            return self._last_start_observed_on
+        if self._last_start_observed_on == 0 and on == 1:
+            self._observed_start_times.append(observed_at)
+        cutoff = observed_at - pd.Timedelta(hours=24)
+        self._observed_start_times = [
+            event for event in self._observed_start_times if event > cutoff
+        ]
+        self._last_start_observed_on = on
+        self._last_start_observed_time = observed_at
+        return on
+
+    def _record_rolling_cycle_diagnostics(
+        self, timestamp: pd.Timestamp, heat: np.ndarray, prior_on: int | None,
+    ) -> None:
+        """Save path-specific counts separately from the mean temperature plan."""
+        if self.rolling_start_limit_24h is None:
+            return
+        heat = np.atleast_2d(np.asarray(heat, dtype=float))
+        if prior_on is None:
+            raise ValueError("Rolling cycle diagnostics require the measured heat-pump state")
+        steps = heat.shape[1]
+        times = pd.date_range(pd.Timestamp(timestamp), periods=steps, freq=self.model_timestep)
+        endpoint = pd.Timestamp(timestamp) + steps * self.model_timestep
+        for scenario, path in enumerate(heat):
+            on = path > 1e-6
+            starts = on & ~np.r_[bool(prior_on), on[:-1]]
+            for step, time_at in enumerate([*times, endpoint]):
+                left = time_at - pd.Timedelta(hours=24)
+                observed = sum(
+                    left < event <= times[0] for event in self._observed_start_times
+                )
+                predicted = int(starts[(times > left) & (times <= time_at)].sum())
+                count = observed + predicted
+                self._rolling_cycle_diagnostics_history.append({
+                    "solved_at": pd.Timestamp(timestamp), "scenario": scenario,
+                    "timestamp": time_at, "step": step, "is_endpoint": step == steps,
+                    "predicted_start": bool(starts[step]) if step < steps else False,
+                    "observed_starts_24h": observed,
+                    "predicted_starts_24h": predicted,
+                    "rolling_starts_24h": count,
+                    "minimum_cycle_slack_starts": max(0, count - self.rolling_start_limit_24h),
+                    "terminal_reserve_shortfall_starts": (
+                        max(0, count - (self.rolling_start_limit_24h - 1))
+                        if step == steps else 0
+                    ),
+                })
+
     def _observe_heat_pump(
         self, timestamp: pd.Timestamp, previous_status: Mapping[str, Any]
     ) -> int | None:
         """Track observed heat-pump stops over the preceding hour."""
+        self.observe_start_history(timestamp, previous_status)
         cutoff = timestamp - pd.Timedelta(hours=1)
         self._recent_off_times = [
             stopped_at for stopped_at in self._recent_off_times if stopped_at > cutoff

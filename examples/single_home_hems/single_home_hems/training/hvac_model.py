@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -12,18 +12,30 @@ import pandas as pd
 
 from .hvac import (
     DAY_INDICATOR_COLUMN,
+    NIGHT_INDICATOR_COLUMN,
     DIFFUSE_HORIZONTAL_IRRADIANCE_COLUMN,
     DIRECT_NORMAL_IRRADIANCE_COLUMN,
     GLOBAL_SOLAR_COLUMN,
+    HVAC_COIL_ER_HEAT_COLUMN,
     HVAC_HEAT_COLUMN,
+    HVAC_HEATING_POWER_COLUMN,
+    HVAC_ER_HEAT_COLUMN,
+    HVAC_FAN_POWER_COLUMN,
+    HVAC_HP_COIL_HEAT_COLUMN,
+    HVAC_HP_MAIN_POWER_COLUMN,
+    HVAC_HP_PROXY_COLUMN,
     HVAC_POWER_COLUMN,
+    HVAC_PROXY_HEAT_COLUMN,
     INDOOR_TEMPERATURE_COLUMN,
     NEXT_INDOOR_TEMPERATURE_COLUMN,
+    OUTDOOR_RELATIVE_HUMIDITY_COLUMN,
     OUTDOOR_TEMPERATURE_COLUMN,
     SOLAR_AZIMUTH_COLUMN,
     SOLAR_ZENITH_COLUMN,
 )
-from .model_diagnostics import create_state_space_diagnostic_outputs
+from .hvac_2r2c import HVACHeatInput
+from .model_diagnostics import create_state_space_selection_outputs
+from .building_envelope_evaluation import save_rollout_evaluation
 from .state_space_predictor_regularized import (
     train_state_space_predictor_group_lasso,
 )
@@ -33,12 +45,15 @@ HVAC_FEATURE_COLUMNS = (
     INDOOR_TEMPERATURE_COLUMN,
     HVAC_HEAT_COLUMN,
     OUTDOOR_TEMPERATURE_COLUMN,
+    OUTDOOR_RELATIVE_HUMIDITY_COLUMN,
     GLOBAL_SOLAR_COLUMN,
     DAY_INDICATOR_COLUMN,
 )
 HVAC_TARGET_COLUMNS = (NEXT_INDOOR_TEMPERATURE_COLUMN,)
+STATE_SPACE_INPUT_COLUMN = "state_space_thermal_heat_w"
 HVAC_DIAGNOSTIC_COLUMNS = (
     HVAC_POWER_COLUMN,
+    HVAC_HEATING_POWER_COLUMN,
     "actual_internal_sensible_gain_w",
     "occupancy_persons",
     "heating_setpoint_c",
@@ -53,6 +68,16 @@ HVAC_DIAGNOSTIC_COLUMNS = (
     "wind_speed_m_per_s",
     "ambient_humidity_ratio",
     "sky_temperature_c",
+)
+HVAC_OPTIONAL_HEAT_DIAGNOSTIC_COLUMNS = (
+    HVAC_HEAT_COLUMN,
+    HVAC_COIL_ER_HEAT_COLUMN,
+    HVAC_PROXY_HEAT_COLUMN,
+    HVAC_HP_PROXY_COLUMN,
+    HVAC_HP_MAIN_POWER_COLUMN,
+    HVAC_FAN_POWER_COLUMN,
+    HVAC_HP_COIL_HEAT_COLUMN,
+    HVAC_ER_HEAT_COLUMN,
 )
 
 
@@ -123,8 +148,14 @@ class HVACStateSpaceConfig:
     model_timestep: pd.Timedelta = pd.Timedelta(minutes=15)
     prediction_horizon: pd.Timedelta = pd.Timedelta(hours=12)
 
-    solar_azimuth_step_degrees: int = 10
+    solar_azimuth_step_degrees: int = 20
     include_ghi: bool = True
+    control_input: HVACHeatInput = field(
+        default_factory=lambda: HVACHeatInput(
+            heat_column=HVAC_COIL_ER_HEAT_COLUMN,
+            power_column=HVAC_HEATING_POWER_COLUMN
+        )
+    )
 
     memory_min: int = 1
     memory_max: int = 12
@@ -160,6 +191,9 @@ class HVACStateSpaceConfig:
             raise ValueError("solar_azimuth_step_degrees must divide 360 evenly")
         if not isinstance(self.include_ghi, bool):
             raise ValueError("include_ghi must be a boolean")
+        if not isinstance(self.control_input, HVACHeatInput):
+            raise TypeError("control_input must be an HVACHeatInput adapter")
+        self.control_input.required_columns()
         for name, value in (
             ("memory_min", self.memory_min),
             ("memory_max", self.memory_max),
@@ -198,14 +232,24 @@ class HVACStateSpaceConfig:
     @property
     def disturbance_columns(self) -> tuple[str, ...]:
         columns = [
-            OUTDOOR_TEMPERATURE_COLUMN,
+            OUTDOOR_RELATIVE_HUMIDITY_COLUMN,
             DAY_INDICATOR_COLUMN,
+            NIGHT_INDICATOR_COLUMN,
             DIFFUSE_HORIZONTAL_IRRADIANCE_COLUMN,
+            *self.projected_dni_columns,
         ]
         if self.include_ghi:
             columns.append(GLOBAL_SOLAR_COLUMN)
-        columns.extend(self.projected_dni_columns)
+        columns.append(OUTDOOR_TEMPERATURE_COLUMN)
         return tuple(columns)
+
+    @property
+    def current_only_disturbance_indices(self) -> tuple[int, ...]:
+        """Day/night gain intercepts have no lagged coefficients."""
+        return tuple(
+            self.disturbance_columns.index(column)
+            for column in (DAY_INDICATOR_COLUMN, NIGHT_INDICATOR_COLUMN)
+        )
 
 
 def load_hvac_training_data(path: Path) -> pd.DataFrame:
@@ -220,18 +264,38 @@ def load_hvac_training_data(path: Path) -> pd.DataFrame:
 def prepare_hvac_training_dataset(
     data: pd.DataFrame,
     window: HVACTrainingWindow,
+    config: HVACStateSpaceConfig | None = None,
 ) -> HVACTrainingDataset:
     """Apply a chronological window and expose the common 2R2C/ARX I/O."""
+    config = config or HVACStateSpaceConfig()
+    control_input = config.control_input
     if not isinstance(data.index, pd.DatetimeIndex):
         raise TypeError("HVAC training data must use a DatetimeIndex")
     if data.index.has_duplicates or not data.index.is_monotonic_increasing:
         raise ValueError("HVAC training timestamps must be unique and increasing")
 
-    required_columns = (
-        *HVAC_FEATURE_COLUMNS,
-        *HVAC_TARGET_COLUMNS,
-        *HVAC_DIAGNOSTIC_COLUMNS,
+    feature_columns = tuple(
+        column for column in HVAC_FEATURE_COLUMNS if column != HVAC_HEAT_COLUMN
     )
+    if control_input.representation == "thermal_heat":
+        feature_columns = (
+            feature_columns[0], control_input.heat_column, *feature_columns[1:]
+        )
+    diagnostic_columns = tuple(
+        column for column in dict.fromkeys(
+            (
+                *HVAC_DIAGNOSTIC_COLUMNS,
+                *control_input.required_columns(),
+                *(
+                    column for column in HVAC_OPTIONAL_HEAT_DIAGNOSTIC_COLUMNS
+                    if column in data
+                ),
+            )
+        ) if column not in feature_columns
+    )
+    required_columns = tuple(dict.fromkeys(
+        (*feature_columns, *HVAC_TARGET_COLUMNS, *diagnostic_columns)
+    ))
     missing = [column for column in required_columns if column not in data]
     if missing:
         raise ValueError(f"HVAC training data is missing columns: {missing}")
@@ -244,12 +308,11 @@ def prepare_hvac_training_dataset(
         raise ValueError(f"No HVAC samples fall in [{window.start}, {window.end})")
 
     numeric_columns = [
-        *HVAC_FEATURE_COLUMNS,
+        *feature_columns,
         *HVAC_TARGET_COLUMNS,
         *(
-            column
-            for column in HVAC_DIAGNOSTIC_COLUMNS
-            if column not in {"heating_mode", "cooling_mode"}
+            column for column in diagnostic_columns
+            if column not in {"heating_mode", "cooling_mode", control_input.mode_column}
         ),
     ]
     numeric = selected.loc[:, numeric_columns].to_numpy(dtype=float)
@@ -257,9 +320,9 @@ def prepare_hvac_training_dataset(
         raise ValueError("HVAC training data contains nonfinite values")
 
     return HVACTrainingDataset(
-        features=selected.loc[:, HVAC_FEATURE_COLUMNS],
+        features=selected.loc[:, feature_columns],
         targets=selected.loc[:, HVAC_TARGET_COLUMNS],
-        diagnostics=selected.loc[:, HVAC_DIAGNOSTIC_COLUMNS],
+        diagnostics=selected.loc[:, diagnostic_columns],
         window=window,
     )
 
@@ -267,12 +330,13 @@ def prepare_hvac_training_dataset(
 def prepare_hvac_dataset_splits(
     data: pd.DataFrame,
     windows: HVACSplitWindows,
+    config: HVACStateSpaceConfig | None = None,
 ) -> HVACDatasetSplits:
     """Prepare three chronological partitions without data leakage."""
     return HVACDatasetSplits(
-        training=prepare_hvac_training_dataset(data, windows.training),
-        validation=prepare_hvac_training_dataset(data, windows.validation),
-        test=prepare_hvac_training_dataset(data, windows.test),
+        training=prepare_hvac_training_dataset(data, windows.training, config),
+        validation=prepare_hvac_training_dataset(data, windows.validation, config),
+        test=prepare_hvac_training_dataset(data, windows.test, config),
     )
 
 
@@ -310,6 +374,30 @@ def add_projected_dni_candidates(
     return result
 
 
+def _uses_recorded_sensible_heat(control_input: HVACHeatInput) -> bool:
+    """Keep the current W input path unchanged for the default adapter."""
+    return (
+        control_input.representation == "thermal_heat"
+        and control_input.heat_column == HVAC_HEAT_COLUMN
+        and control_input.heat_multiplier_to_kw == 0.001
+    )
+
+
+def _state_space_heat_input_w(
+    data: pd.DataFrame, control_input: HVACHeatInput
+) -> pd.Series:
+    """Convert a selected source representation to signed thermal input W."""
+    if control_input.representation == "power_mode":
+        if control_input.power_column == HVAC_POWER_COLUMN:
+            cooling_mode = data["cooling_mode"].astype(str).str.strip().str.casefold()
+            if cooling_mode.ne("off").any():
+                raise ValueError(
+                    "Total HVAC electric power cannot be mapped through heating "
+                    "mode while cooling is active; use heating-only power"
+                )
+    return control_input.thermal_heat_kw(data) * 1000.0
+
+
 def aggregate_hvac_dataset(
     dataset: HVACTrainingDataset,
     config: HVACStateSpaceConfig,
@@ -338,17 +426,24 @@ def aggregate_hvac_dataset(
         )
 
     data = add_projected_dni_candidates(data, config)
+    # The old training CSV records only the day regime. Derive its complement
+    # here so the same historical dates can be retrained without regeneration.
+    data[NIGHT_INDICATOR_COLUMN] = 1 - data[DAY_INDICATOR_COLUMN]
+    input_column = HVAC_HEAT_COLUMN
+    if not _uses_recorded_sensible_heat(config.control_input):
+        input_column = STATE_SPACE_INPUT_COLUMN
+        data[input_column] = _state_space_heat_input_w(data, config.control_input)
     aggregation = {
         INDOOR_TEMPERATURE_COLUMN: "first",
-        HVAC_HEAT_COLUMN: "mean",
+        input_column: "mean",
         **{
-            column: "first" if column == DAY_INDICATOR_COLUMN else "mean"
+            column: "first" if column in {DAY_INDICATOR_COLUMN, NIGHT_INDICATOR_COLUMN} else "mean"
             for column in config.disturbance_columns
         },
         NEXT_INDOOR_TEMPERATURE_COLUMN: "last",
         HVAC_POWER_COLUMN: "mean",
     }
-    return (
+    aggregated = (
         data.loc[:, list(aggregation)]
         .resample(
             config.model_timestep,
@@ -358,6 +453,9 @@ def aggregate_hvac_dataset(
         )
         .agg(aggregation)
     )
+    # The target at a label equal to window.end is the first indoor state of
+    # the next split. Keep that boundary state entirely out of this split.
+    return aggregated.loc[aggregated.index < dataset.window.end]
 
 
 def to_hvac_state_space_frame(
@@ -366,7 +464,11 @@ def to_hvac_state_space_frame(
 ) -> pd.DataFrame:
     """Map HVAC interval data to the generic predictor schema."""
     frame = pd.DataFrame(index=aggregated.index)
-    frame["Input_1"] = aggregated[HVAC_HEAT_COLUMN]
+    input_column = (
+        HVAC_HEAT_COLUMN if _uses_recorded_sensible_heat(config.control_input)
+        else STATE_SPACE_INPUT_COLUMN
+    )
+    frame["Input_1"] = aggregated[input_column]
     frame["Output_1"] = aggregated[NEXT_INDOOR_TEMPERATURE_COLUMN]
     for index, column in enumerate(config.disturbance_columns, start=1):
         frame[f"Disturbance_{index}"] = aggregated[column]
@@ -494,15 +596,40 @@ def _save_hvac_model(
     selected_disturbances = [
         config.disturbance_columns[index] for index in selected_indices
     ]
+    control_input = config.control_input
+    input_sources = (
+        [control_input.heat_column]
+        if control_input.representation == "thermal_heat"
+        else [control_input.power_column, control_input.mode_column]
+    )
     metadata = {
         "schema_version": 1,
         "model_type": "regularized_exogenous_state_space",
         "columns": {
-            "input": [HVAC_HEAT_COLUMN],
+            "input": input_sources,
+            "model_input": ["Input_1"],
+            "model_input_units": (
+                "W of HP coil heat plus ER heat"
+                if control_input.representation == "thermal_heat"
+                and control_input.heat_column == HVAC_COIL_ER_HEAT_COLUMN
+                else "W of signed thermal heat"
+            ),
             "outputs": [INDOOR_TEMPERATURE_COLUMN],
             "disturbances": list(config.disturbance_columns),
         },
         "configuration": {
+            "control_input": {
+                "representation": control_input.representation,
+                "heat_column": control_input.heat_column,
+                "heat_multiplier_to_kw": control_input.heat_multiplier_to_kw,
+                "power_column": control_input.power_column,
+                "mode_column": control_input.mode_column,
+                "mode_heat_factors": dict(control_input.mode_heat_factors),
+                "total_power_cooling_guard": (
+                    control_input.representation == "power_mode"
+                    and control_input.power_column == HVAC_POWER_COLUMN
+                ),
+            },
             "source_timestep_seconds": config.source_timestep.total_seconds(),
             "model_timestep_seconds": config.model_timestep.total_seconds(),
             "prediction_horizon_seconds": config.prediction_horizon.total_seconds(),
@@ -510,6 +637,10 @@ def _save_hvac_model(
             "solar_azimuth_step_degrees": config.solar_azimuth_step_degrees,
             "surface_tilt_degrees": 90,
             "include_ghi": config.include_ghi,
+            "current_only_disturbances": [
+                config.disturbance_columns[index]
+                for index in config.current_only_disturbance_indices
+            ],
             "memory_min": config.memory_min,
             "memory_max": config.memory_max,
             "scaling": config.scaling,
@@ -547,19 +678,21 @@ def _save_hvac_model(
             for name in ("training", "validation", "test")
         },
         "test_metrics": test_metrics,
+        "rollout_metrics": model.get("rollout_metrics", {}),
         "diagnostic_outputs": {
             "figure_directory": "figures",
             "figures": [
                 Path(path).name for path in model.get("figure_files", ())
             ],
             "csv_files": [
-                "predictions.csv",
-                "residuals.csv",
-                "rmse_by_horizon.csv",
                 "memory_selection.csv",
                 "lambda_selection.csv",
                 "selected_disturbances.csv",
+                "rollout_predictions.csv",
+                "rollout_metrics.csv",
             ],
+            "axis_limits_file": "axis_limits.json",
+            "indoor_temperature_axis_limits_c": model.get("temperature_limits_c"),
         },
         "regularization_summary": _regularization_summary(
             model, config.disturbance_columns
@@ -573,6 +706,7 @@ def train_hvac_model(
     splits: HVACDatasetSplits,
     model_output: Path,
     config: HVACStateSpaceConfig | None = None,
+    temperature_limits_c: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Fit, evaluate, and save the regularized building-envelope model."""
     config = config or HVACStateSpaceConfig()
@@ -599,6 +733,7 @@ def train_hvac_model(
         group_lasso_solver="cvxpy",
         cvxpy_solver=config.cvxpy_solver,
         group_lasso_scaling=config.scaling,
+        current_only_disturbance_indices=config.current_only_disturbance_indices,
         lambda_selection_metric="validation_rolling_horizon_rmse",
         memory_selection_method="relative_aic",
         relative_aicc_pct_thresh=config.relative_aicc_threshold,
@@ -612,16 +747,25 @@ def train_hvac_model(
         for index in model["selected_disturbance_indices"]
     ]
     model_output = Path(model_output)
-    model["figure_files"] = create_state_space_diagnostic_outputs(
+    model["figure_files"] = create_state_space_selection_outputs(
         model=model,
-        frames=frames,
         model_output=model_output,
-        output_names=(INDOOR_TEMPERATURE_COLUMN,),
         disturbance_names=config.disturbance_columns,
         model_label="HVAC indoor-temperature model",
         solar_azimuth_by_disturbance=dict(
             zip(config.projected_dni_columns, config.solar_azimuths_degrees)
         ),
+        model_timestep_minutes=config.model_timestep.total_seconds() / 60,
     )
+    rollout_metrics, rollout_figure, plotted_limits = save_rollout_evaluation(
+        model,
+        frames,
+        config.model_timestep,
+        model_output / "figures",
+        temperature_limits_c=temperature_limits_c,
+    )
+    model["rollout_metrics"] = rollout_metrics
+    model["temperature_limits_c"] = list(plotted_limits)
+    model["figure_files"] = (*model["figure_files"], rollout_figure)
     _save_hvac_model(model, model_output, config, splits, test_metrics)
     return model

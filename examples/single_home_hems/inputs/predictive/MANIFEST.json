@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "purpose": "Reusable bidirectional EV-only and joint HVAC/HPWH/EV predictive simulations; no case results",
+  "files": [
+    {
+      "path": "examples/five_home_block/five_home_block/reference/kokam75_25C_profile_v1.csv",
+      "source_path_before_packaging": "examples/five_home_block/five_home_block/reference/kokam75_25C_profile_v1.csv",
+      "bytes": 74828,
+      "sha256": "5a8e4aefa2a175d6e10176fa106a2d1c2b2f0c0a102d8f1b4e00c3cb46568c15"
+    },
+    {
+      "path": "examples/five_home_block/inputs/ev/audi_forecasting_15min_100vehicle.parquet",
+      "source_path_before_packaging": "examples/five_home_block/inputs/ev/audi_forecasting_15min_100vehicle.parquet",
+      "bytes": 1024192,
+      "sha256": "c0f2d9fad7067e0d420882f5d7cbbcd81b8638f17903e6dc8bfdd21f0375b7b8"
+    },
+    {
+      "path": "examples/five_home_block/inputs/ev/audi_forecasting_15min_20vehicle.parquet",
+      "source_path_before_packaging": "examples/five_home_block/inputs/ev/audi_forecasting_15min_20vehicle.parquet",
+      "bytes": 241556,
+      "sha256": "4491121a91b0b0e300435b67433907508ab444c39f30a485b436676e100f8727"
+    },
+    {
+      "path": "examples/single_home_hems/external_data/dc_house_power/AC_unitoutreturn.csv",
+      "source_path_before_packaging": "examples/single_home_hems/external_data/dc_house_power/AC_unitoutreturn.csv",
+      "bytes": 3955708,
+      "sha256": "910e308d9496a9dfd008ee06a63cc3608c873ec1cc3ddddfca089d91d1293014"
+    },
+    {
+      "path": "examples/single_home_hems/external_data/dc_house_power/AHU_fanreturn.csv",
+      "source_path_before_packaging": "examples/single_home_hems/external_data/dc_house_power/AHU_fanreturn.csv",
+      "bytes": 3833640,
+      "sha256": "f2928b02ed9b52c769dd7617ea6e8e147a4a125bf4bd85aaa509388f5c4083c9"
+    },
+    {
+      "path": "examples/single_home_hems/external_data/dc_house_power/EV Chargerreturn.csv",
+      "source_path_before_packaging": "examples/single_home_hems/external_data/dc_house_power/EV Chargerreturn.csv",
+      "bytes": 2604272,
+      "sha256": "9c9a8d5d214571838bda39fb2b7bf4dc04621290861f63163296bca42570cd9f"
+    },
+    {
+      "path": "examples/single_home_hems/external_data/dc_house_power/GM Home Hubreturn.csv",
+      "source_path_before_packaging": "examples/single_home_hems/external_data/dc_house_power/GM Home Hubreturn.csv",
+      "bytes": 3927987,
+      "sha256": "d0c46c8d7f499464f1d1283b406e2b5e50a5aebf9297f317c60e9be8301b190e"
+    },
+    {
+      "path": "examples/single_home_hems/external_data/dc_house_power/HPWHreturn.csv",
+      "source_path_before_packaging": "examples/single_home_hems/external_data/dc_house_power/HPWHreturn.csv",
+      "bytes": 2786745,
+      "sha256": "e373be2ef0e8f8b98f578bb2577dc7d923f8fea1978cdd87f83fbe02747c095d"
+    },
+    {
+      "path": "examples/single_home_hems/external_data/dc_house_power/rest_of_home_load.csv",
+      "source_path_before_packaging": "examples/single_home_hems/external_data/dc_house_power/rest_of_home_load.csv",
+      "bytes": 4721659,
+      "sha256": "4e836495041110c86af36b4009ad750908e5f03598242151d52521c3ae968fd0"
+    },
+    {
+      "path": "examples/single_home_hems/external_data/dc_house_power/total_home_demand_hhreturn.csv",
+      "source_path_before_packaging": "examples/single_home_hems/external_data/dc_house_power/total_home_demand_hhreturn.csv",
+      "bytes": 3937697,
+      "sha256": "b298e9c8eda3ee6514552f4f6353a495adbd314c54b496ca1f962c11eb103b5b"
+    },
+    {
+      "path": "examples/single_home_hems/external_data/miso_cin_psi/cin_psi_da_expost_lmp_2025-11-30_to_2025-12-08.metadata.json",
+      "source_path_before_packaging": "examples/single_home_hems/external_data/miso_cin_psi/cin_psi_da_expost_lmp_2025-11-30_to_2025-12-08.metadata.json",
+      "bytes": 4245,
+      "sha256": "717142267ef3e9feb7e92a7460dbd54c62ba76f0512dea8b66c8fb57c5afedbe"
+    },
+    {
+      "path": "examples/single_home_hems/external_data/miso_cin_psi/cin_psi_da_expost_lmp_2025-11-30_to_2025-12-08_hourly.csv",
+      "source_path_before_packaging": "examples/single_home_hems/external_data/miso_cin_psi/cin_psi_da_expost_lmp_2025-11-30_to_2025-12-08_hourly.csv",
+      "bytes": 32902,
+      "sha256": "3ec7f2ae4830f69433f6b550d24fc8357eeb72bc2979e02db6f165d959e22dba",
+      "packaging_note": "Line endings normalized from CRLF to LF; hourly price rows unchanged."
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/forecasts/hub_other_forecast_source.csv",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/ev_home_hub_baseline_6wk/hub_other_forecast_study/hub_other_forecast_source.csv",
+      "bytes": 4425658,
+      "sha256": "0bb7ec81f089898a2912bb2ac42ce03a9989b45053206cd4a03c5ccb4447d589"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/forecasts/outside_hub_forecast_source.csv",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/ev_home_hub_baseline_6wk/outside_hub_forecast_study/outside_hub_forecast_source.csv",
+      "bytes": 4569262,
+      "sha256": "0d9b1b04a8b8932910f51748eb9638194526ba491cf03eb4fac6b790deb489eb"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/models/eligible_hub_rf.joblib",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/ev_eligible_rf_4wk_no_er/models.joblib",
+      "bytes": 15486246,
+      "sha256": "b622f9dfbb3591334f680d48cf66fb981603dd1d03bf2c3c9c9551cee170f2bf"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/models/eligible_hub_rf_metadata.json",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/ev_eligible_rf_4wk_no_er/metadata.json",
+      "bytes": 3274,
+      "sha256": "d7370d213a374d1c7043ad962438174becad6835ec2dbeb8fcbac0a458775a43"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/models/hvac_state_space_regularized/metadata.json",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/building_envelope_training/state_space_predictor_regularized/metadata.json",
+      "bytes": 295455,
+      "sha256": "8b607add0135bb0d09d28adabdfaa69866c4ab1d05a8b6943afa5fd36b505858"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/models/hvac_state_space_regularized/model_arrays.npz",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/building_envelope_training/state_space_predictor_regularized/model_arrays.npz",
+      "bytes": 24180,
+      "sha256": "e62acf6052c19edb31e84298be5a0d54e1e1057a7f00c63c47b08c95a96070ab"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/models/outside_hub_er_multires_rf.joblib",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/ev_outside_er_multires_rf_4wk/model.joblib",
+      "bytes": 17704878,
+      "sha256": "73200963d9745cc8d834b44ca0f8e8b301d55937238328133504d20926f4e10d"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/models/outside_hub_er_study_metadata.json",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/ev_home_hub_baseline_6wk_no_er/outside_hub_with_resistance_forecast_study/supplemental/rf_multires_weather/metadata.json",
+      "bytes": 28558,
+      "sha256": "9941335e7261643ff2c9f4727da0b70832612e8692148204bd1ed2293a8d69c3"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/seeds/home_hub_meter_15min.csv",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/native_pretest_oikolab_nov03_rest_sep06/data/home_hub_meter_15min.csv",
+      "bytes": 228691,
+      "sha256": "a2d13746075c3812c4d0fb0369b0937c186f6b844fad2068898e1f8eeddd997b"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/seeds/outside_hub_pretest_minute.csv",
+      "source_path_before_packaging": null,
+      "bytes": 1525131,
+      "sha256": "5afac12c1bdaa5de408b923e2a3c1b12529628f506bc928f4adc8d2a1989f712"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/weather/gfs_00z_forecasts.parquet",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/oikolab_weather/prepared/gfs_00z_forecasts.parquet",
+      "bytes": 219436,
+      "sha256": "6b453de98881b347cf1f598038bb1c9f3228a23c2aaa6b47bc2019d0c8457289"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/weather/realized_1min.csv",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/oikolab_weather/prepared/realized_1min.csv",
+      "bytes": 28152935,
+      "sha256": "ac9b13bf9fd2c4d5ab9031e2e70afba855291ca69fb19100387e3e2c9bb8bc61"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/weather/source_manifest.json",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/oikolab_weather/prepared/manifest.json",
+      "bytes": 7635,
+      "sha256": "1583a93c66f5e2c126132ecb688b2d538ec4e4071ae28caeb151b602caf9f95d"
+    }
+  ],
+  "compact_outside_hub_seed": {
+    "path": "examples/single_home_hems/inputs/predictive/seeds/outside_hub_pretest_minute.csv",
+    "source_sha256": {
+      "examples/single_home_hems/outputs/home_01/native_pretest_oikolab_nov03_rest_sep06/data/home_hub_meter_minute.csv": "6c56506a9cc6de63dc731db2ed6eaadc861aa3057f6c51bdb979480fa65d9c4f",
+      "examples/single_home_hems/outputs/home_01/native_pretest_oikolab_nov03_rest_sep06/data/home_01_standardized.csv": "47b65cd3336d816dae3222a328ff7988b9e4d1ff6c51a8fb776ddd1136fae7e0",
+      "examples/single_home_hems/outputs/home_01/native_pretest_oikolab_nov03_rest_sep06/data/raw/home_01.csv": "b221bba4ca619e9bbfe5728ade7a6dbe0d086d54e8590e604fa0b34d7f43f0cd"
+    },
+    "derivation": "At each pretest minute: total_electric_power_kw - (home_hub_power_kw - HVAC Heating ER Power (kW)); timestamp is local-naive minute completion.",
+    "rows": 40320,
+    "serialization": "decimal float64 with %.17g; read with pandas float_precision=round_trip",
+    "verification": "Exact float64 equality with original _read_pretest_seed at local midnights 2025-11-05, 2025-11-10, 2025-11-20, and 2025-11-30; each 1440 minutes."
+  }
+}

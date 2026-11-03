@@ -90,6 +90,18 @@ def build_scenario_problem(
         )
         for name, expressions in components.items()
     }
+    if optimization_kind == "milp" and controller.terminal_weight > 0:
+        # A one-time endpoint term, without the per-step horizon normalization.
+        # Taking the positive part within each path before averaging is the
+        # expected terminal shortfall under equally probable scenarios.
+        reserve_temperature_c = (110.0 - 32.0) * 5.0 / 9.0
+        aggregated_components["terminal_objective_cost"] = (
+            controller.terminal_weight / count
+            * sum(
+                cp.pos(reserve_temperature_c - temperatures[0, steps - 1])
+                for temperatures in temperature_paths
+            )
+        )
     controller._objective_component_expressions = aggregated_components
     problem = cp.Problem(cp.Minimize(sum(aggregated_components.values())), constraints)
     return (

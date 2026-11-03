@@ -26,10 +26,16 @@ from examples.single_home_hems.single_home_hems.training import (
     DIFFUSE_HORIZONTAL_IRRADIANCE_COLUMN,
     DIRECT_NORMAL_IRRADIANCE_COLUMN,
     DISTURBANCE_COLUMNS,
+    DAY_INDICATOR_COLUMN,
+    NIGHT_INDICATOR_COLUMN,
+    GLOBAL_SOLAR_COLUMN,
+    HVAC_HEATING_POWER_COLUMN,
     HVACInternalGainRegime,
     HVACSplitWindows,
     HVACStateSpaceConfig,
     HVACTrainingWindow,
+    OUTDOOR_RELATIVE_HUMIDITY_COLUMN,
+    OUTDOOR_TEMPERATURE_COLUMN,
     WaterHeaterSensorLayout,
     WaterHeaterSplitWindows,
     WaterHeaterStateSpaceConfig,
@@ -50,6 +56,12 @@ from examples.single_home_hems.single_home_hems.training import (
 from examples.single_home_hems.single_home_hems.simulation import (
     SingleHomeHEMSSimulation,
     select_home,
+)
+from examples.single_home_hems.single_home_hems.training.hvac_2r2c import HVACHeatInput
+from examples.single_home_hems.single_home_hems.training.hvac import (
+    HVAC_COIL_ER_HEAT_COLUMN,
+    HVAC_HP_PROXY_COLUMN,
+    HVAC_PROXY_HEAT_COLUMN,
 )
 
 
@@ -330,7 +342,11 @@ class SingleHomeSelectionTests(unittest.TestCase):
             )
 
     @staticmethod
-    def hvac_record(timestamp: pd.Timestamp, indoor_temperature: float) -> dict:
+    def hvac_record(
+        timestamp: pd.Timestamp,
+        indoor_temperature: float,
+        cooling_electric_kw: float = 0.0,
+    ) -> dict:
         indoor = SimpleNamespace(
             t_idx=0,
             hvac_sens_gain=1200.0,
@@ -338,6 +354,7 @@ class SingleHomeSelectionTests(unittest.TestCase):
         )
         schedule = {
             "Ambient Dry Bulb (C)": 5.0,
+            "Ambient Relative Humidity (-)": 0.65,
             "GHI (W/m^2)": 300.0,
             "Occupancy (Persons)": 2.0,
             "DNI (W/m^2)": 400.0,
@@ -358,12 +375,19 @@ class SingleHomeSelectionTests(unittest.TestCase):
         heating = SimpleNamespace(
             electric_kw=0.5,
             temp_setpoint=20.0,
-            mode="On",
+            mode="HP On",
+            capacity=1000.0,
+            er_capacity=0.0,
+            eir=0.4,
+            er_eir_rated=1.0,
+            fan_power=100.0,
+            space_fraction=1.0,
+            defrost_model="Legacy",
         )
         cooling = SimpleNamespace(
-            electric_kw=0.0,
+            electric_kw=cooling_electric_kw,
             temp_setpoint=24.0,
-            mode="Off",
+            mode="On" if cooling_electric_kw > 0 else "Off",
         )
         return hvac_training_record(
             timestamp,
@@ -376,12 +400,23 @@ class SingleHomeSelectionTests(unittest.TestCase):
     def test_hvac_record_uses_global_solar_and_day_night_regime(self) -> None:
         day = self.hvac_record(pd.Timestamp("2018-01-01 12:00"), 21.0)
         night = self.hvac_record(pd.Timestamp("2018-01-01 23:00"), 20.0)
+        simultaneous = self.hvac_record(
+            pd.Timestamp("2018-01-01 17:00"), 21.0, cooling_electric_kw=0.2
+        )
         custom_regime = HVACInternalGainRegime(day_start_hour=8, day_end_hour=18)
 
         self.assertEqual(day["global_horizontal_irradiance_w_per_m2"], 300.0)
+        self.assertEqual(day["outdoor_relative_humidity_fraction"], 0.65)
         self.assertEqual(day["internal_gain_day_indicator"], 1)
+        self.assertEqual(day[NIGHT_INDICATOR_COLUMN], 0)
         self.assertEqual(night["internal_gain_day_indicator"], 0)
+        self.assertEqual(night[NIGHT_INDICATOR_COLUMN], 1)
         self.assertEqual(day["hvac_indoor_sensible_heat_w"], 1200.0)
+        self.assertEqual(day[HVAC_COIL_ER_HEAT_COLUMN], 1000.0)
+        self.assertEqual(day[HVAC_HP_PROXY_COLUMN], 1250.0)
+        self.assertEqual(day[HVAC_PROXY_HEAT_COLUMN], 1250.0)
+        self.assertEqual(simultaneous["hvac_heating_electric_power_kw"], 0.5)
+        self.assertEqual(simultaneous["hvac_electric_power_kw"], 0.7)
         self.assertEqual(day["next_indoor_temperature_c"], 21.1)
         self.assertEqual(day["actual_internal_sensible_gain_w"], 360.0)
         self.assertEqual(custom_regime.is_day(pd.Timestamp("2018-01-01 07:00")), 0)
@@ -401,6 +436,11 @@ class SingleHomeSelectionTests(unittest.TestCase):
 
         self.assertEqual(dataset.sample_count, 2)
         self.assertIn("global_horizontal_irradiance_w_per_m2", dataset.features)
+        self.assertIn(OUTDOOR_RELATIVE_HUMIDITY_COLUMN, dataset.features)
+        self.assertEqual(
+            dataset.features[OUTDOOR_RELATIVE_HUMIDITY_COLUMN].tolist(),
+            [0.65, 0.65],
+        )
         self.assertNotIn("diffuse_horizontal_irradiance_w_per_m2", dataset.features)
         self.assertIn(
             "diffuse_horizontal_irradiance_w_per_m2",
@@ -445,7 +485,20 @@ class SingleHomeSelectionTests(unittest.TestCase):
 
         projected = add_projected_dni_candidates(data, config)
 
-        self.assertEqual(len(config.projected_dni_columns), 36)
+        self.assertEqual(config.solar_azimuths_degrees, tuple(range(0, 360, 20)))
+        self.assertEqual(len(config.projected_dni_columns), 18)
+        self.assertEqual(
+            config.disturbance_columns,
+            (
+                OUTDOOR_RELATIVE_HUMIDITY_COLUMN,
+                DAY_INDICATOR_COLUMN,
+                NIGHT_INDICATOR_COLUMN,
+                DIFFUSE_HORIZONTAL_IRRADIANCE_COLUMN,
+                *config.projected_dni_columns,
+                GLOBAL_SOLAR_COLUMN,
+                OUTDOOR_TEMPERATURE_COLUMN,
+            ),
+        )
         for surface_azimuth in config.solar_azimuths_degrees:
             expected = 800 * max(
                 np.sin(np.deg2rad(60))
@@ -469,10 +522,16 @@ class SingleHomeSelectionTests(unittest.TestCase):
             ],
             index=index,
         )
+        data.loc[index[:15], OUTDOOR_RELATIVE_HUMIDITY_COLUMN] = np.linspace(
+            0.50, 0.64, 15
+        )
         window = HVACTrainingWindow(
             index[0], index[0] + pd.Timedelta(minutes=30)
         )
-        dataset = prepare_hvac_training_dataset(data, window)
+        # Historical CSVs contain only the day indicator; aggregation derives night.
+        dataset = prepare_hvac_training_dataset(
+            data.drop(columns=NIGHT_INDICATOR_COLUMN), window
+        )
         config = HVACStateSpaceConfig(
             prediction_horizon=pd.Timedelta(minutes=30),
             solar_azimuth_step_degrees=90,
@@ -484,17 +543,30 @@ class SingleHomeSelectionTests(unittest.TestCase):
 
         self.assertEqual(
             aggregated.index.tolist(),
-            [pd.Timestamp("2018-01-01 11:15"), pd.Timestamp("2018-01-01 11:30")],
+            [pd.Timestamp("2018-01-01 11:15")],
         )
         self.assertEqual(aggregated.iloc[0]["indoor_temperature_c"], 20.0)
         self.assertAlmostEqual(
             aggregated.iloc[0]["next_indoor_temperature_c"], 20.24
         )
-        self.assertEqual(aggregated.iloc[1]["indoor_temperature_c"], 20.15)
+        self.assertNotIn(pd.Timestamp("2018-01-01 11:30"), aggregated.index)
+        self.assertEqual(aggregated.iloc[0]["state_space_thermal_heat_w"], 1000.0)
+        self.assertEqual(frame.iloc[0]["Input_1"], 1000.0)
         self.assertAlmostEqual(
-            aggregated.iloc[1]["next_indoor_temperature_c"], 20.39
+            aggregated.iloc[0][OUTDOOR_RELATIVE_HUMIDITY_COLUMN], 0.57
         )
-        self.assertEqual(aggregated.iloc[0]["hvac_indoor_sensible_heat_w"], 1200.0)
+        self.assertAlmostEqual(frame.iloc[0]["Disturbance_1"], 0.57)
+        self.assertEqual(
+            config.disturbance_columns,
+            (
+                OUTDOOR_RELATIVE_HUMIDITY_COLUMN,
+                DAY_INDICATOR_COLUMN,
+                NIGHT_INDICATOR_COLUMN,
+                DIFFUSE_HORIZONTAL_IRRADIANCE_COLUMN,
+                *config.projected_dni_columns,
+                OUTDOOR_TEMPERATURE_COLUMN,
+            ),
+        )
         self.assertEqual(
             frame.columns.tolist(),
             [
@@ -506,10 +578,53 @@ class SingleHomeSelectionTests(unittest.TestCase):
                 ],
             ],
         )
+        self.assertEqual(config.current_only_disturbance_indices, (1, 2))
+        self.assertEqual(aggregated.iloc[0][DAY_INDICATOR_COLUMN], 1)
+        self.assertEqual(aggregated.iloc[0][NIGHT_INDICATOR_COLUMN], 0)
         self.assertIn(
             DIFFUSE_HORIZONTAL_IRRADIANCE_COLUMN,
             config.disturbance_columns,
         )
+
+    def test_hvac_power_mode_converts_each_mode_before_aggregation(self) -> None:
+        index = pd.date_range("2018-01-01 11:00", periods=30, freq="min")
+        data = pd.DataFrame(
+            [self.hvac_record(timestamp, 20.0) for timestamp in index],
+            index=index,
+        ).drop(columns="hvac_indoor_sensible_heat_w")
+        data.loc[index[:7], "heating_mode"] = "HP On"
+        data.loc[index[7:], "heating_mode"] = "ER On"
+        data.loc[index[:7], HVAC_HEATING_POWER_COLUMN] = 1.0
+        data.loc[index[7:], HVAC_HEATING_POWER_COLUMN] = 2.0
+        data.loc[index[14], "cooling_mode"] = "On"
+        window = HVACTrainingWindow(index[0], index[0] + pd.Timedelta(minutes=30))
+        heating_only = HVACStateSpaceConfig(
+            prediction_horizon=pd.Timedelta(minutes=30),
+            control_input=HVACHeatInput(
+                representation="power_mode",
+                power_column=HVAC_HEATING_POWER_COLUMN,
+                mode_heat_factors={"HP On": 3.0, "ER On": 1.0},
+            ),
+        )
+        dataset = prepare_hvac_training_dataset(data, window, heating_only)
+        aggregated = aggregate_hvac_dataset(dataset, heating_only)
+        frame = to_hvac_state_space_frame(aggregated, heating_only)
+        self.assertNotIn("hvac_indoor_sensible_heat_w", dataset.features)
+        self.assertAlmostEqual(
+            frame.iloc[0]["Input_1"], (7 * 3000 + 8 * 2000) / 15
+        )
+
+        total_power = HVACStateSpaceConfig(
+            prediction_horizon=pd.Timedelta(minutes=30),
+            control_input=HVACHeatInput(
+                representation="power_mode",
+                power_column="hvac_electric_power_kw",
+                mode_heat_factors={"HP On": 3.0, "ER On": 1.0},
+            ),
+        )
+        total_dataset = prepare_hvac_training_dataset(data, window, total_power)
+        with self.assertRaisesRegex(ValueError, "cooling is active"):
+            aggregate_hvac_dataset(total_dataset, total_power)
 
     def test_control_shape_validation(self) -> None:
         timestamp = pd.Timestamp("2018-01-01")

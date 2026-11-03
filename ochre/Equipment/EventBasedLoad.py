@@ -148,8 +148,17 @@ class EventBasedLoad(Equipment):
             }
 
         # set start and end times to be on the simulation time
-        self.all_events["start_time"] = self.all_events["start_time"].dt.round(self.time_res)
-        self.all_events["end_time"] = self.all_events["end_time"].dt.round(self.time_res)
+        for column in ("start_time", "end_time"):
+            times = self.all_events[column]
+            if isinstance(times.dtype, pd.DatetimeTZDtype):
+                # Round instants in UTC. Rounding aware local wall times can
+                # fail at the repeated autumn hour even when they carry offsets.
+                self.all_events[column] = (
+                    times.dt.tz_convert("UTC").dt.round(self.time_res)
+                    .dt.tz_convert(times.dt.tz)
+                )
+            else:
+                self.all_events[column] = times.dt.round(self.time_res)
         self.event_start = self.all_events.loc[self.event_index, "start_time"]
         self.event_end = self.all_events.loc[self.event_index, "end_time"]
 
@@ -207,8 +216,14 @@ class EventBasedLoad(Equipment):
         if self.event_index == len(self.all_events):
             # no more events - reset to last event index and move start/end times to the end of the simulation
             self.event_index -= 1
-            self.all_events.loc[self.event_index, "start_time"] = pd.Timestamp.max
-            self.all_events.loc[self.event_index, "end_time"] = pd.Timestamp.max
+            event_tz = self.all_events["start_time"].dt.tz
+            sentinel = (
+                pd.Timestamp.max
+                if event_tz is None else
+                (pd.Timestamp.max - pd.Timedelta(days=2)).tz_localize("UTC").tz_convert(event_tz)
+            )
+            self.all_events.loc[self.event_index, "start_time"] = sentinel
+            self.all_events.loc[self.event_index, "end_time"] = sentinel
 
         self.event_start = self.all_events.loc[self.event_index, "start_time"]
         self.event_end = self.all_events.loc[self.event_index, "end_time"]

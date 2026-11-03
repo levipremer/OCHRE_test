@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import pandas as pd
+from pytz.exceptions import InvalidTimeError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .transformer import DistributionTransformer
+from .ev_config import EVOptions, validate_home_evs
 
 
 class ConfigurationError(ValueError):
@@ -44,10 +48,12 @@ class EVConfig:
     max_commute_distance_var_miles: float | None
     max_commute_times_var_hr: float | None
     max_roundtrip_miles: float | None
+    hems: EVOptions | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EVConfig":
         return cls(
+            hems=EVOptions(**data["hems"]) if data.get("hems") is not None else None,
             vehicle_id=str(data["vehicle_id"]),
             vehicle_type=str(data["vehicle_type"]),
             capacity_kwh=float(data["capacity_kwh"]),
@@ -91,6 +97,47 @@ class EVConfig:
         )
 
 @dataclass(frozen=True)
+class RestOfHomeConfig:
+    """Select native OCHRE electricity or the DC House forecast test measurements."""
+
+    source: str = "ochre"
+    data_file: Path | None = None
+    source_start: str = "2026-09-15"
+    missing_data_policy: str = "error"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], repo_root: Path) -> "RestOfHomeConfig":
+        if not isinstance(data, dict):
+            raise ConfigurationError("rest_of_home must be a JSON object")
+        source = data.get("source", "ochre")
+        if source not in {"ochre", "dc_house_test"}:
+            raise ConfigurationError("rest_of_home.source must be ochre or dc_house_test")
+        policy = data.get("missing_data_policy", "error")
+        if policy not in {"error", "linear_interpolate"}:
+            raise ConfigurationError(
+                "rest_of_home.missing_data_policy must be error or linear_interpolate"
+            )
+        source_start = str(data.get("source_start", "2026-09-15"))
+        try:
+            dt.datetime.fromisoformat(source_start)
+        except ValueError as exc:
+            raise ConfigurationError("rest_of_home.source_start must be an ISO date or datetime") from exc
+        data_file = data.get(
+            "data_file",
+            "examples/single_home_hems/external_data/dc_house_power/rest_of_home_load.csv",
+        )
+        return cls(
+            source=source,
+            data_file=(
+                _resolve_file(repo_root, data_file, "DC House rest-of-home data")
+                if source == "dc_house_test" else None
+            ),
+            source_start=source_start,
+            missing_data_policy=policy,
+        )
+
+
+@dataclass(frozen=True)
 class HomeConfig:
     """Supported per-home inputs used to create one OCHRE dwelling."""
 
@@ -115,12 +162,13 @@ class HomeConfig:
     water_heater_setpoint_c: float
     evs: tuple[EVConfig, ...]
     water_heater_deadband_c: float | None = None
+    rest_of_home: RestOfHomeConfig = RestOfHomeConfig()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], repo_root: Path) -> "HomeConfig":
         """Build and validate a home configuration from decoded JSON."""
         required = {field.name for field in cls.__dataclass_fields__.values()} - {
-            "water_heater_deadband_c"
+            "water_heater_deadband_c", "rest_of_home"
         }
         missing = required - set(data)
         if missing:
@@ -169,6 +217,7 @@ class HomeConfig:
                 if data.get("water_heater_deadband_c") is not None
                 else None
             ),
+            rest_of_home=RestOfHomeConfig.from_dict(data.get("rest_of_home", {}), repo_root),
         )
         config.validate()
         return config
@@ -315,9 +364,54 @@ class NeighborhoodConfig:
     defrost_er_strategy: str
     transformer: DistributionTransformer
     homes: tuple[HomeConfig, ...]
+    heating_season: bool = False
+    weather_metadata: dict[str, Any] | None = None
+    ground_mains_epw_file: Path | None = None
+    weather_interpolation: str = "step"
+    weather_forecast_file: Path | None = None
+
+    def __post_init__(self) -> None:
+        # `dataclasses.replace` is used for CLI start-time overrides and HEMS
+        # warmup windows, so normalize here as well as on initial JSON load.
+        if not isinstance(self.weather_metadata, dict) or not isinstance(
+            self.weather_metadata.get("timezone"), str
+        ):
+            return
+        try:
+            zone = ZoneInfo(self.weather_metadata["timezone"])
+            start = pd.Timestamp(self.start_time)
+            start = (
+                start.tz_localize(zone, ambiguous="raise", nonexistent="raise")
+                if start.tzinfo is None else start.tz_convert(zone)
+            )
+        except (InvalidTimeError, ValueError, ZoneInfoNotFoundError) as exc:
+            raise ConfigurationError("start_time or weather_metadata.timezone is invalid or ambiguous") from exc
+        object.__setattr__(self, "start_time", start)
 
     def validate(self) -> None:
         """Validate neighborhood-wide settings and home identifiers."""
+        if self.weather_interpolation not in {"step", "linear"}:
+            raise ConfigurationError("weather_interpolation must be step or linear")
+        if self.weather_metadata is not None:
+            if self.weather_file.suffix.lower() != ".csv":
+                raise ConfigurationError("weather_metadata requires a realized weather CSV")
+            if not isinstance(self.weather_metadata, dict):
+                raise ConfigurationError("weather_metadata must be a JSON object")
+            missing = {"latitude", "longitude", "timezone"} - self.weather_metadata.keys()
+            if missing:
+                raise ConfigurationError(f"weather_metadata is missing {sorted(missing)}")
+            try:
+                latitude = float(self.weather_metadata["latitude"])
+                longitude = float(self.weather_metadata["longitude"])
+                ZoneInfo(str(self.weather_metadata["timezone"]))
+            except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+                raise ConfigurationError("weather_metadata needs numeric latitude/longitude and an IANA timezone") from exc
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                raise ConfigurationError("weather_metadata latitude/longitude are out of range")
+        if self.ground_mains_epw_file is not None and self.ground_mains_epw_file.suffix.lower() != ".epw":
+            raise ConfigurationError("ground_mains_epw_file must be an EPW file")
+        if not isinstance(self.heating_season, bool):
+            raise ConfigurationError("heating_season must be a boolean")
         if self.duration <= dt.timedelta(0):
             raise ConfigurationError("duration must be positive")
         if self.time_step <= dt.timedelta(0) or self.time_step > self.duration:
@@ -341,6 +435,13 @@ class NeighborhoodConfig:
         if not self.homes:
             raise ConfigurationError("at least one home must be configured")
         ids = [home.home_id for home in self.homes]
+        for home in self.homes:
+            validate_home_evs(home.evs)
+        if any(ev.hems is not None for home in self.homes for ev in home.evs):
+            if self.time_step != dt.timedelta(minutes=1):
+                raise ConfigurationError("HEMS EV simulation requires a one-minute time step")
+            if self.start_time.second or self.start_time.microsecond:
+                raise ConfigurationError("HEMS EV simulation must start on a minute boundary")
         if len(ids) != len(set(ids)):
             raise ConfigurationError(f"home IDs must be unique, got {ids}")
 
@@ -364,6 +465,13 @@ def load_configuration(config_directory: Path, repo_root: Path | None = None) ->
     with homes_file.open(encoding="utf-8") as stream:
         home_data = json.load(stream)
 
+    return configuration_from_documents(data, home_data, config_directory, repo_root)
+
+
+def configuration_from_documents(data, home_data, config_directory, repo_root):
+    """Build the existing runtime configuration from in-memory documents."""
+    config_directory = Path(config_directory).resolve()
+    repo_root = Path(repo_root).resolve()
     homes = tuple(HomeConfig.from_dict(item, repo_root) for item in home_data)
     output_path = Path(data["output_directory"])
     output_path = output_path if output_path.is_absolute() else repo_root / output_path
@@ -379,16 +487,33 @@ def load_configuration(config_directory: Path, repo_root: Path | None = None) ->
     except (KeyError, TypeError, ValueError) as exc:
         raise ConfigurationError(f"Invalid transformer configuration: {exc}") from exc
 
+    weather_file = _resolve_file(repo_root, data["weather_file"], "Weather file")
+    weather_metadata = data.get("weather_metadata")
+    start_time = dt.datetime.fromisoformat(data["start_time"])
+    ground_mains_epw_file = data.get("ground_mains_epw_file")
+    weather_forecast_file = data.get("weather_forecast_file")
     config = NeighborhoodConfig(
         repo_root=repo_root,
         config_directory=config_directory,
-        start_time=dt.datetime.fromisoformat(data["start_time"]),
+        start_time=start_time,
         duration=dt.timedelta(hours=float(data["duration_hours"])),
         time_step=dt.timedelta(minutes=float(data["time_step_minutes"])),
         initialization_time=(
             dt.timedelta(hours=initialization_hours) if initialization_hours > 0 else None
         ),
-        weather_file=_resolve_file(repo_root, data["weather_file"], "Weather file"),
+        weather_file=weather_file,
+        weather_metadata=weather_metadata,
+        ground_mains_epw_file=(
+            _resolve_file(repo_root, ground_mains_epw_file, "Ground and mains EPW file")
+            if ground_mains_epw_file is not None else None
+        ),
+        weather_interpolation=str(data.get(
+            "weather_interpolation", "linear" if weather_metadata is not None else "step"
+        )),
+        weather_forecast_file=(
+            _resolve_file(repo_root, weather_forecast_file, "Weather forecast file")
+            if weather_forecast_file is not None else None
+        ),
         output_directory=output_path.resolve(),
         random_seed=int(data["random_seed"]),
         verbosity=int(data["verbosity"]),
@@ -405,6 +530,7 @@ def load_configuration(config_directory: Path, repo_root: Path | None = None) ->
         homes=homes,
         ev_trip_file=_resolve_file(repo_root, data["ev_trip_file"], "EV trip file"),
         NHTS_location_CDIVMSAR_ID=int(data.get("NHTS_location_CDIVMSAR_ID", 0)),
+        heating_season=data.get("heating_season", False),
     )
     config.validate()
     return config
