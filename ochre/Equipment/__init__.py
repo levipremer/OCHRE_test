@@ -11,6 +11,7 @@ from .HVAC import (
     GasBoiler,
     HeatPumpHeater,
     ASHPHeater,
+    DualFuelASHPHeater,
     MinisplitAHSPHeater,
     Cooler,
     AirConditioner,
@@ -46,6 +47,7 @@ EQUIPMENT_BY_NAME = {
             GasBoiler,
             HeatPumpHeater,
             ASHPHeater,
+            DualFuelASHPHeater,
             MinisplitAHSPHeater,
         ]
     },

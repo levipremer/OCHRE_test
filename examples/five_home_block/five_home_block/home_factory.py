@@ -5,10 +5,12 @@ from __future__ import annotations
 import numpy as np
 
 import datetime as dt
+import json
 from pathlib import Path
 from typing import Mapping
 
 import pandas as pd
+from pytz.exceptions import NonExistentTimeError
 
 from ochre import Dwelling
 from ochre.Equipment import Equipment
@@ -20,10 +22,49 @@ class HomeValidationError(RuntimeError):
 
 
 def _event_timestamp(day: dt.datetime, clock: dt.time) -> dt.datetime:
-    return dt.datetime.combine(day.date(), clock, tzinfo=day.tzinfo)
+    wall = pd.Timestamp(dt.datetime.combine(day.date(), clock))
+    if day.tzinfo is None:
+        return wall
+    # Source trips have no UTC offset. Use the approved first occurrence of a
+    # repeated hour, and reject a nonexistent spring-forward local hour.
+    try:
+        return wall.tz_localize(day.tzinfo, ambiguous=True, nonexistent="raise")
+    except NonExistentTimeError as exc:
+        raise ValueError(f"Legacy EV trip uses a nonexistent local time: {wall}") from exc
 
-def _load_weather_raw(weather_file: Path) -> pd.DataFrame:
-    """Load EPW weather and build a (month, day, hour, minute) lookup table."""
+
+def _next_local_calendar_day(timestamp: dt.datetime) -> pd.Timestamp:
+    """Advance the date while retaining the local clock across DST changes."""
+    value = pd.Timestamp(timestamp)
+    next_wall = value.tz_localize(None) + pd.DateOffset(days=1)
+    if value.tzinfo is None:
+        return next_wall
+    # The legacy EV source has no fold bit. A repeated local hour uses its
+    # first occurrence, as chosen for the weather lookup and trip timestamps.
+    try:
+        return next_wall.tz_localize(value.tzinfo, ambiguous=True, nonexistent="raise")
+    except NonExistentTimeError as exc:
+        raise ValueError(f"Legacy EV trip uses a nonexistent local time: {next_wall}") from exc
+
+def _load_weather_raw(weather_file: Path, weather_metadata: Mapping | None = None) -> pd.DataFrame:
+    """Load realized dry-bulb weather for the native EV temperature lookup."""
+
+    if weather_metadata is not None:
+        weather = pd.read_csv(weather_file, usecols=["Time", "temp_air"])
+        times = pd.DatetimeIndex(pd.to_datetime(weather["Time"], utc=True)).tz_convert(
+            str(weather_metadata["timezone"])
+        )
+        lookup = pd.DataFrame({
+            "dry_bulb": pd.to_numeric(weather["temp_air"], errors="raise").to_numpy(),
+            "month": times.month,
+            "day": times.day,
+            "hour": times.hour,
+            "minute": times.minute,
+        })
+        # Native EV trip times have no UTC offset. For the repeated fall-back
+        # hour, use the first local occurrence (EDT, fold=0) as agreed.
+        keys = ["month", "day", "hour", "minute"]
+        return lookup.drop_duplicates(keys, keep="first").set_index(keys).sort_index()
 
     # EPW has 8 header lines; no column names
     df = pd.read_csv(weather_file, skiprows=8, header=None)
@@ -401,11 +442,12 @@ def overlaps(trip, commute):
 
 def distance_to_kwh(ev: EVConfig, distance_miles: float, temp_c: float) -> float:
     # Driving efficiencies of different EV vehicle types (miles/kWh)
-    # https://www.epa.gov/system/files/documents/2026-02/420r26001.pdf
+    # NREL light-duty vehicle efficiency ratios, Table 3 (truck uses SUV proxy).
+    # https://docs.nlr.gov/docs/fy23osti/84631.pdf
     base_eff = {
-        "sedan": 3.4,
-        "suv":   2.9,
-        "truck": 2.2,
+        "sedan": 132 / 33.71,
+        "suv":   119 / 33.71,
+        "truck": 86 / 33.71,
     }[ev.vehicle_type.lower()]
 
     # Temperature penalty (AAA test data)
@@ -452,7 +494,13 @@ def build_ev_multiday_schedule(ev, neighborhood, trip_pool, weather_by_mdhm, rng
 
     start = neighborhood.start_time
     end = start + neighborhood.duration
-    days = pd.date_range(start=start, end=end, freq="D", tz=start.tzinfo)
+    # Trips are sampled per local calendar date. Midnight anchors stay valid
+    # through both DST transitions even when the simulation starts at 01:xx.
+    days = pd.date_range(
+        start=pd.Timestamp(start).normalize(),
+        end=pd.Timestamp(end).normalize(),
+        freq="D",
+    )
 
     capacity_kwh = ev.capacity_kwh
     initial_soc = getattr(ev, "initial_soc_fraction", 0.5)
@@ -473,14 +521,15 @@ def build_ev_multiday_schedule(ev, neighborhood, trip_pool, weather_by_mdhm, rng
     def avg_temp(day_dt, s, e):
         m, d = day_dt.month, day_dt.day
         h1, h2 = s.hour, e.hour
+        start_weather = weather_by_mdhm.loc[(m, d, h1, 0), "dry_bulb"]
+        end_weather = weather_by_mdhm.loc[(m, d, h2, 0), "dry_bulb"]
         return 0.5 * (
-            weather_by_mdhm.loc[(m, d, h1, 0), "dry_bulb"] +
-            weather_by_mdhm.loc[(m, d, h2, 0), "dry_bulb"]
+            start_weather + end_weather
         )
 
     def assign_trip_days(day_dt:dt.datetime, start_t: dt.datetime, end_t: dt.datetime) -> tuple[dt.datetime, dt.datetime]:
         start_day = day_dt
-        end_day = day_dt + dt.timedelta(days=1) if end_t < start_t else day_dt
+        end_day = _next_local_calendar_day(day_dt) if end_t < start_t else day_dt
         return start_day, end_day
 
 
@@ -609,7 +658,7 @@ def build_ev_multiday_schedule(ev, neighborhood, trip_pool, weather_by_mdhm, rng
 
         # ensure next_ts is strictly after end_ts
         while next_ts <= end_ts:
-            next_ts = next_ts + dt.timedelta(days=1)
+            next_ts = _next_local_calendar_day(next_ts)
 
         orig_charge_start = end_ts
         orig_charge_end = next_ts
@@ -684,6 +733,7 @@ def _equipment_overrides(
     water_heater_hp_only: bool = False,
     evs: tuple[EVConfig, ...] | None = None,
     ev_event_schedules: Mapping[str, pd.DataFrame] | None = None,
+    ev_mobility_schedules: Mapping | None = None,
     write_ev_diagnostics: bool = True,
     defrost_model: str = "Legacy",
     defrost_control_type: str = "Auto",
@@ -743,12 +793,12 @@ def _equipment_overrides(
 
     trip_pool = None
     weather_by_mdhm = None
-    if ev_event_schedules is None:
+    if ev_event_schedules is None and any(ev.hems is None for ev in configured_evs):
         trip_pool = build_trip_pool(
             neighborhood.ev_trip_file,
             neighborhood.NHTS_location_CDIVMSAR_ID,
         )
-        weather_by_mdhm = _load_weather_raw(neighborhood.weather_file)
+        weather_by_mdhm = _load_weather_raw(neighborhood.weather_file, neighborhood.weather_metadata)
 
     from ochre.Equipment import ElectricVehicle
 
@@ -765,6 +815,19 @@ def _equipment_overrides(
             )
 
     for ev in configured_evs:
+        if ev.hems is not None:
+            from dataclasses import asdict
+            from .ev_equipment import BidirectionalEV
+            if ev_mobility_schedules is None or ev.vehicle_id not in ev_mobility_schedules:
+                raise ValueError("HEMS EV equipment requires prepared mobility schedules")
+            ev_equipment[f"EV_{ev.vehicle_id}"] = {
+                "equipment_class": BidirectionalEV, "results_name": f"EV_{ev.vehicle_id}",
+                "ev_config": {"vehicle_id": ev.vehicle_id, "capacity_kwh": ev.capacity_kwh,
+                              "charger_power_kw": ev.charger_power_kw,
+                              "initial_soc_fraction": ev.initial_soc_fraction, "hems": asdict(ev.hems)},
+                "mobility": dict(vars(ev_mobility_schedules[ev.vehicle_id])),
+            }
+            continue
         if ev_event_schedules is not None:
             try:
                 ev_sched = ev_event_schedules[ev.vehicle_id].copy(deep=True)
@@ -807,6 +870,9 @@ def _equipment_overrides(
         "Water Heating": water_heating,
         **ev_equipment,
     }
+
+
+HEATING_SEASON_COOLING_SETPOINT_C = 30.0
 
 
 def _set_thermostats(
@@ -876,6 +942,10 @@ def create_dwelling(
     water_nodes: int | None = None,
     water_heater_hp_only: bool = False,
     initial_temp_setpoint: float | None = None,
+    rest_of_home_simulation_start: pd.Timestamp | None = None,
+    rest_of_home_duration: dt.timedelta | None = None,
+    ev_mobility_schedules: Mapping | None = None,
+    hub_split_replay_kw: pd.DataFrame | None = None,
 ) -> Dwelling:
     """Create a dwelling; None retains OCHRE's randomized indoor temperature."""
     if water_nodes is not None and (
@@ -885,8 +955,115 @@ def create_dwelling(
     ):
         raise ValueError("water_nodes must be a positive integer")
     rng = np.random.default_rng(neighborhood.random_seed + home.seed_offset)
+    if any(ev.hems is not None for ev in home.evs):
+        from .ev_config import validate_home_evs
+        from .ev_schedule import build_ev_schedules
+        validate_home_evs(home.evs)
+        if neighborhood.initialization_time:
+            raise ValueError("HEMS EV replay requires zero OCHRE initialization time; use explicit simulation warmup")
+        if ev_mobility_schedules is None:
+            ev_mobility_schedules = build_ev_schedules(neighborhood, home)
     raw_output_directory.mkdir(parents=True, exist_ok=True)
-    dwelling = Dwelling(
+    for filename in (
+        "rest_of_home_replay.csv",
+        "rest_of_home_metadata.json",
+        "rest_of_home_interpolated_test_minutes.csv",
+    ):
+        (raw_output_directory / filename).unlink(missing_ok=True)
+    dwelling_class = Dwelling
+    replay_kwargs = {}
+    rest_of_home_equipment = {}
+    rest_of_home = getattr(home, "rest_of_home", None)
+    if hub_split_replay_kw is not None:
+        from .rest_of_home_dwelling import (
+            MEASURED_HUB_OTHER_NAME,
+            MEASURED_OUTSIDE_HUB_NAME,
+            MeasuredRestOfHomeLoad,
+            RestOfHomeReplayDwelling,
+        )
+
+        expected_columns = ["hub_other_power_kw", "outside_hub_power_kw"]
+        if (
+            not isinstance(hub_split_replay_kw, pd.DataFrame)
+            or list(hub_split_replay_kw.columns) != expected_columns
+        ):
+            raise ValueError(f"Hub split replay requires exactly these columns: {expected_columns}")
+        index = hub_split_replay_kw.index
+        if (not isinstance(index, pd.DatetimeIndex) or index.empty or index.hasnans
+                or index.has_duplicates or not index.is_monotonic_increasing
+                or not index.equals(pd.date_range(index[0], index[-1], freq=neighborhood.time_step))):
+            raise ValueError("Hub split replay requires a complete, regular DatetimeIndex")
+        power = hub_split_replay_kw.apply(pd.to_numeric, errors="raise").astype(float)
+        if not np.isfinite(power.to_numpy()).all() or power.lt(0).any().any():
+            raise ValueError("Hub split replay power must be finite and nonnegative")
+        dwelling_class = RestOfHomeReplayDwelling
+        replay_kwargs["measured_rest_of_home_power_kw"] = power.sum(axis=1)
+        names = (MEASURED_HUB_OTHER_NAME, MEASURED_OUTSIDE_HUB_NAME)
+        for column, name in zip(expected_columns, names):
+            rest_of_home_equipment[name] = {
+                "equipment_class": MeasuredRestOfHomeLoad,
+                "measured_rest_of_home_power_kw": power[[column]],
+            }
+    elif rest_of_home is not None and rest_of_home.source == "dc_house_test":
+        from .rest_of_home import RestOfHomeReplay
+        from .rest_of_home_dwelling import (
+            MEASURED_REST_OF_HOME_NAME,
+            MeasuredRestOfHomeLoad,
+            RestOfHomeReplayDwelling,
+        )
+
+        replay_start = pd.Timestamp(
+            neighborhood.start_time
+            if rest_of_home_simulation_start is None else rest_of_home_simulation_start
+        )
+        replay_duration = (
+            pd.Timedelta(neighborhood.duration)
+            - (replay_start - pd.Timestamp(neighborhood.start_time))
+            if rest_of_home_duration is None else pd.Timedelta(rest_of_home_duration)
+        )
+        if replay_duration <= pd.Timedelta(0):
+            raise ValueError("Rest-of-home replay duration must be positive")
+        replay = RestOfHomeReplay.from_config(rest_of_home, simulation_start=replay_start)
+        replay_times = pd.date_range(
+            replay_start,
+            replay_start + replay_duration,
+            freq=neighborhood.time_step,
+            inclusive="left",
+        )
+        timestep = pd.Timedelta(neighborhood.time_step)
+        measured_power = replay.power_at(replay_times, timestep=timestep)
+        replay.audit_frame(replay_times, timestep=timestep).to_csv(
+            raw_output_directory / "rest_of_home_replay.csv"
+        )
+        # This audit covers all filled minutes in the held-out test split;
+        # the per-step replay CSV identifies which ones the actual run used.
+        replay.interpolated_minutes.to_csv(
+            raw_output_directory / "rest_of_home_interpolated_test_minutes.csv", index=False
+        )
+        (raw_output_directory / "rest_of_home_metadata.json").write_text(
+            json.dumps(replay.metadata, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
+        dwelling_class = RestOfHomeReplayDwelling
+        replay_kwargs["measured_rest_of_home_power_kw"] = measured_power
+        rest_of_home_equipment[MEASURED_REST_OF_HOME_NAME] = {
+            "equipment_class": MeasuredRestOfHomeLoad,
+            "measured_rest_of_home_power_kw": measured_power.to_frame(),
+        }
+
+    equipment_overrides = _equipment_overrides(
+        home,
+        neighborhood,
+        rng,
+        water_nodes=water_nodes,
+        water_heater_hp_only=water_heater_hp_only,
+        ev_mobility_schedules=ev_mobility_schedules,
+        defrost_model=neighborhood.defrost_model,
+        defrost_control_type=neighborhood.defrost_control_type,
+        defrost_er_strategy=neighborhood.defrost_er_strategy,
+    )
+    equipment_overrides.update(rest_of_home_equipment)
+    dwelling = dwelling_class(
         name=home.home_id,
         start_time=neighborhood.start_time,
         duration=neighborhood.duration,
@@ -896,23 +1073,27 @@ def create_dwelling(
         hpxml_file=str(home.hpxml_file),
         hpxml_schedule_file=str(home.schedule_file),
         weather_file=str(neighborhood.weather_file),
+        weather_metadata=neighborhood.weather_metadata,
+        ground_mains_epw_file=(
+            str(neighborhood.ground_mains_epw_file)
+            if neighborhood.ground_mains_epw_file is not None else None
+        ),
+        weather_interpolation=neighborhood.weather_interpolation,
         output_path=str(raw_output_directory),
         save_results=True,
         save_args_to_json=True,
         verbosity=neighborhood.verbosity,
         metrics_verbosity=neighborhood.verbosity,
         seed=neighborhood.random_seed + home.seed_offset,
-        Equipment=_equipment_overrides(
-            home,
-            neighborhood,
-            rng,
-            water_nodes=water_nodes,
-            water_heater_hp_only=water_heater_hp_only,
-            defrost_model=neighborhood.defrost_model,
-            defrost_control_type=neighborhood.defrost_control_type,
-            defrost_er_strategy=neighborhood.defrost_er_strategy,
+        Equipment=equipment_overrides,
+        **replay_kwargs,
+    )
+    _set_thermostats(
+        dwelling,
+        home,
+        cooling_setpoint_c=(
+            HEATING_SEASON_COOLING_SETPOINT_C if neighborhood.heating_season else None
         ),
     )
-    _set_thermostats(dwelling, home)
     validate_required_equipment(dwelling, home.home_id)
     return dwelling

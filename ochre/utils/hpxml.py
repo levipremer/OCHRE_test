@@ -875,10 +875,24 @@ def parse_hvac(hvac_type, hvac_all):
             heat_pump.get("BackupHeatingSwitchoverTemperature", 40),
         )
         er_lockout_temp = convert(er_lockout_temp, "degF", "degC")
-        if backup_capacity:
-            if backup_fuel != 'electricity':
+        if backup_fuel == 'natural gas':
+            if name != 'air-to-air':
+                raise OCHREException(
+                    f'Dual-fuel backup is only supported for air-to-air heat pumps, not {name}.'
+                )
+            out.update(
+                {
+                    'Equipment Name': 'dual-fuel air-to-air',
+                    'ResStock Backup Heating Capacity (W)': backup_capacity,
+                    'Furnace Backup AFUE (-)': backup_cop,
+                    'Heat Pump Lockout Temperature (C)': hp_lockout_temp,
+                    'Backup Lockout Temperature (C)': er_lockout_temp,
+                }
+            )
+        elif backup_capacity:
+            if backup_fuel not in [None, 'electricity']:
                 print(f'WARNING: Using electric resistance backup for ASHP instead of {backup_fuel} backup')
-            
+
             out.update(
                 {
                     "Backup EIR (-)": 1 / backup_cop,

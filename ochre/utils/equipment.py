@@ -17,6 +17,7 @@ EQUIPMENT_NAMES_BY_TYPE = {
         ('FloorFurnace', 'Electricity'): 'Electric Furnace',
         ('Boiler', 'Electricity'): 'Electric Boiler',
         ('air-to-air', 'Electricity'): 'ASHP Heater',
+        ('dual-fuel air-to-air', 'Electricity'): 'Dual Fuel ASHP Heater',
         ('mini-split', 'Electricity'): 'MSHP Heater',
         ('Ideal Heater', 'Electricity'): 'Generic Heater',
         (None, 'Electricity'): 'Generic Heater',

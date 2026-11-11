@@ -693,7 +693,8 @@ class DynamicHVAC(HVAC):
             rated_efficiency = kwargs.get('Rated Efficiency', '(Unknown Efficiency)')
             multispeed_file = kwargs.get('multispeed_file', 'HVAC Multispeed Parameters.csv')
             df_speed = load_csv(multispeed_file)
-            speed_params = df_speed.loc[(df_speed['HVAC Name'] == self.name) & 
+            performance_name = getattr(self, 'performance_name', self.name)
+            speed_params = df_speed.loc[(df_speed['HVAC Name'] == performance_name) &
                                         (df_speed['HVAC Efficiency'] == rated_efficiency) &
                                         (df_speed['Number of Speeds'] == self.n_speeds)]
             if not len(speed_params):
@@ -720,7 +721,8 @@ class DynamicHVAC(HVAC):
                                                                                                 SPEED_TYPES))
         speed_type = SPEED_TYPES[self.n_speeds]
 
-        biquadratic_file = kwargs.get('biquadratic_file', f'Biquadratic {self.name}.csv')
+        performance_name = getattr(self, 'performance_name', self.name)
+        biquadratic_file = kwargs.get('biquadratic_file', f'Biquadratic {performance_name}.csv')
         biquad_params = self.initialize_parameters(biquadratic_file, value_col=None, **kwargs)
         biquad_params = biquad_params.loc[:, [col for col in biquad_params if speed_type == col.split('_')[0]]]
         if len(biquad_params.columns) != self.n_speeds:
@@ -834,7 +836,9 @@ class DynamicHVAC(HVAC):
         else:
             raise OCHREException('Incompatible number of speeds for dynamic equipment:', self.n_speeds)
 
-    def calculate_biquadratic_param(self, param, speed_idx, flow_fraction=1, part_load_ratio=1):
+    def calculate_biquadratic_param(
+            self, param, speed_idx, flow_fraction=1, part_load_ratio=1,
+            ambient_temperature_c=None, coil_input_temperature_c=None):
         # runs biquadratic equation for EIR or capacity given the speed index
         # param is 'cap' or 'eir'
 
@@ -853,8 +857,16 @@ class DynamicHVAC(HVAC):
         params = self.biquad_params[speed_idx]
 
         # use coil input wet bulb for cooling, dry bulb for heating; ambient dry bulb for both
-        t_in = self.coil_input_db if self.is_heater else self.coil_input_wb
-        t_ext_db = self.current_schedule['Ambient Dry Bulb (C)']
+        t_in = (
+            coil_input_temperature_c
+            if coil_input_temperature_c is not None
+            else self.coil_input_db if self.is_heater else self.coil_input_wb
+        )
+        t_ext_db = (
+            ambient_temperature_c
+            if ambient_temperature_c is not None
+            else self.current_schedule['Ambient Dry Bulb (C)']
+        )
 
         # clip temperatures, flow fraction, part load ratio to stay within bounds
         t_in = min(max(t_in, params['min_Twb']), params['max_Twb'])
@@ -1011,6 +1023,17 @@ class HeatPumpHeater(DynamicHVAC, Heater):
                 f'Unknown Defrost Model ({defrost_model}). Should be one of: {list(defrost_models.values())}'
             )
         self.defrost_model = defrost_models[defrost_model]
+        # Future runs coordinate normal backup dispatch with the compressor
+        # and finish an already-running discrete event before ordinary off
+        # commands. Explicit False values retain diagnostic legacy behavior.
+        self.defrost_er_pause_requires_compressor = bool(
+            kwargs.get('Defrost ER Pause Requires Compressor', True)
+        )
+        self.defrost_finish_active_cycle = bool(
+            kwargs.get('Defrost Finish Active Cycle', True)
+        )
+        self._defrost_finish_hold = False
+        self._defrost_last_normal_hp_capacity = 0
 
         control_type = str(kwargs.get('Defrost Control Type', 'Auto')).strip().lower()
         control_types = {'auto': 'Auto', 'timer': 'Timer', 'demand': 'Demand'}
@@ -1083,6 +1106,57 @@ class HeatPumpHeater(DynamicHVAC, Heater):
         delta_omega_coil_out = max(0.000001, omega_ext - omega_sat_coil)
         return 1.0 / (1 + (0.01446 / delta_omega_coil_out))
 
+    def _defrost_completion_required(self):
+        """Whether an existing running cycle may defer an ordinary off call.
+
+        A pending timer with an off compressor never starts a new call. Warm
+        termination, a cold compressor lockout and electrical loss take
+        priority over finishing a cycle.
+        """
+        outdoor = self.current_schedule['Ambient Dry Bulb (C)']
+        lockout = getattr(self, 'hp_lockout_temp', None)
+        return (
+            getattr(self, 'defrost_finish_active_cycle', False)
+            and self.defrost_model == 'Discrete'
+            and (self.mode == 'On' or 'HP' in self.mode)
+            and self.defrost_remaining > dt.timedelta()
+            and outdoor < self.defrost_temp_threshold
+            and (lockout is None or outdoor >= lockout)
+            and self.current_schedule.get('Voltage (-)', 1) != 0
+        )
+
+    def _retain_active_defrost_mode(self, requested_mode, previous_speed):
+        requested = self.mode if requested_mode is None else requested_mode
+        if self._defrost_completion_required() and not (requested == 'On' or 'HP' in requested):
+            self._defrost_finish_hold = True
+            self.speed_idx = previous_speed
+            if self.mode == 'On':
+                return 'On'
+            return 'HP and ER On' if 'ER' in requested else 'HP On'
+        return requested_mode
+
+    def update_internal_control(self):
+        self._defrost_finish_hold = False
+        previous_speed = self.speed_idx
+        mode = super().update_internal_control()
+        return self._retain_active_defrost_mode(mode, previous_speed)
+
+    def run_duty_cycle_control(self, duty_cycles):
+        self._defrost_finish_hold = False
+        previous_speed = self.speed_idx
+        mode = super().run_duty_cycle_control(duty_cycles)
+        return self._retain_active_defrost_mode(mode, previous_speed)
+
+    def _retain_defrost_capacity(self, capacity):
+        """Keep the prior operating point when an ideal off call is deferred."""
+        if (self.use_ideal_capacity and getattr(self, '_defrost_finish_hold', False)
+                and self._defrost_completion_required() and capacity <= 0):
+            capacity = min(getattr(self, '_defrost_last_normal_hp_capacity', 0), self.capacity_max)
+            if capacity <= 0:
+                raise OCHREException('An active defrost cycle has no prior positive compressor capacity.')
+            self.set_ideal_speed_idx(capacity)
+        return capacity
+
     def update_capacity(self):
         # Update capacity if legacy, time-averaged defrost is required
         capacity = super().update_capacity()
@@ -1092,7 +1166,7 @@ class HeatPumpHeater(DynamicHVAC, Heater):
         if self.defrost_model != 'Legacy':
             self.power_defrost = 0
             self.defrost_power_mult = 1
-            return capacity
+            return self._retain_defrost_capacity(capacity)
 
         # Based on EnergyPlus Engineering Reference, Defrost Operation, for on demand, reverse cycle defrost
         # see https://bigladdersoftware.com/epx/docs/8-9/engineering-reference/variable-refrigerant-flow-heat-pumps.html#defrost-operation-201605050925
@@ -1224,10 +1298,15 @@ class HeatPumpHeater(DynamicHVAC, Heater):
         normal_er_eir = getattr(self, 'er_eir_rated', 0)
         normal_er_power = normal_er_capacity * normal_er_eir
         normal_hp_capacity = self.capacity - normal_er_capacity
+        if hp_running and normal_hp_capacity > 0:
+            self._defrost_last_normal_hp_capacity = normal_hp_capacity
 
         scale = self.space_fraction
         fan_power = self.fan_power / scale if scale else 0
-        total_main_power = ((self.electric_kw - self.fan_power / 1000) * 1000 / scale) if scale else 0
+        # Derive component power from the thermal model rather than electric_kw.
+        # This keeps discrete defrost compatible with equipment whose backup
+        # heat uses a different fuel from the compressor.
+        total_main_power = abs(self.capacity) * self.eir
         normal_hp_power = max(total_main_power - normal_er_power, 0)
         self.hp_power = normal_hp_power
 
@@ -1422,6 +1501,23 @@ class ASHPHeater(HeatPumpHeater):
         self.min_time_in_mode['HP and ER On'] = dt.timedelta(minutes=min_er_on_time)
         self.min_time_in_mode['ER On'] = dt.timedelta(minutes=min_er_on_time)
 
+    def update_model(self, control_signal=None):
+        # A combined HP/backup minimum-mode lock must not defeat a compressor
+        # cold-safety lockout. Backup dispatch and compressor minimum times are
+        # handled independently below; retain the configured lock afterward.
+        mode = self.mode
+        cold_lockout = (self.hp_lockout_temp is not None
+                        and self.current_schedule['Ambient Dry Bulb (C)'] < self.hp_lockout_temp)
+        minimum = self.min_time_in_mode.get(mode, dt.timedelta())
+        release_transition_lock = cold_lockout and 'HP' in mode and minimum > dt.timedelta()
+        if release_transition_lock:
+            self.min_time_in_mode[mode] = dt.timedelta()
+        try:
+            return super().update_model(control_signal)
+        finally:
+            if release_transition_lock:
+                self.min_time_in_mode[mode] = minimum
+
     def configure_er_stages(
         self,
         capacity,
@@ -1553,9 +1649,28 @@ class ASHPHeater(HeatPumpHeater):
         if not self.use_ideal_capacity:
             self.er_stage_idx = len(self.er_capacity_list) - 1 if 'ER' in mode else 0
             self.er_stage_timer = dt.timedelta()
-        return mode
+        hp_on = self._effective_compressor_call(mode == 'On' or 'HP' in mode)
+        return self._combined_ashp_mode(hp_on, 'ER' in mode)
+
+    @staticmethod
+    def _combined_ashp_mode(hp_on, er_on):
+        if hp_on:
+            return 'HP and ER On' if er_on else 'HP On'
+        return 'ER On' if er_on else 'Off'
+
+    def _effective_compressor_call(self, requested_on):
+        """One compressor policy update per internal or direct-duty call."""
+        outdoor = self.current_schedule['Ambient Dry Bulb (C)']
+        forced_off = self.hp_lockout_temp is not None and outdoor < self.hp_lockout_temp
+        if (getattr(self, 'defrost_er_pause_requires_compressor', False)
+                or getattr(self, 'defrost_finish_active_cycle', False)):
+            forced_off |= self.current_schedule.get('Voltage (-)', 1) == 0
+        return self.enforce_compressor_min_time(requested_on, force_off=forced_off)
 
     def update_internal_control(self):
+        self._defrost_finish_hold = False
+        corrected_er_pause = getattr(self, 'defrost_er_pause_requires_compressor', False)
+        defer_er_control = corrected_er_pause and not self.use_ideal_capacity
         if self.use_ideal_capacity and not self.use_staged_er_control:
             # Note: not calling super().update_internal_control
             # Update setpoint from schedule
@@ -1584,31 +1699,26 @@ class ASHPHeater(HeatPumpHeater):
             # get HP and ER modes separately
             hp_mode = super().update_internal_control()
             hp_on = hp_mode in ['On', 'HP On'] if hp_mode is not None else 'HP' in self.mode
-            er_mode = self.run_er_thermostat_control()
+            if not defer_er_control:
+                er_mode = self.run_er_thermostat_control()
+                er_on = er_mode == 'On' if er_mode is not None else 'ER' in self.mode
+
+        hp_on = self._effective_compressor_call(hp_on)
+        if defer_er_control:
+            er_mode = self.run_er_thermostat_control(hp_running=hp_on)
             er_on = er_mode == 'On' if er_mode is not None else 'ER' in self.mode
-
-        # Force HP off if outdoor temp is very cold
-        t_ext_db = self.current_schedule['Ambient Dry Bulb (C)']
-        compressor_forced_off = (
-            self.hp_lockout_temp is not None and t_ext_db < self.hp_lockout_temp
-        )
-        hp_on = self.enforce_compressor_min_time(hp_on, force_off=compressor_forced_off)
-
-        # combine HP and ER modes
-        if er_on:
-            if hp_on:
-                return 'HP and ER On'
-            else:
-                return 'ER On'
-        else:
-            if hp_on:
-                return 'HP On'
-            else:
-                return 'Off'
+        elif (corrected_er_pause and self.use_ideal_capacity and self.use_staged_er_control
+              and not hp_on and 'HP' in self.mode and self.defrost_remaining > dt.timedelta()):
+            er_mode = self.run_er_thermostat_control(hp_running=False)
+            er_on = self.er_ext_capacity > 0 if self.er_ext_capacity is not None else er_mode == 'On'
+        return self._combined_ashp_mode(hp_on, er_on)
 
     def enforce_compressor_min_time(self, requested_on, force_off=False):
         """Apply compressor-only minimum times while leaving backup heat independent."""
         compressor_was_on = "HP" in self.mode
+        if self._defrost_completion_required() and not requested_on and not force_off:
+            self._defrost_finish_hold = True
+            requested_on = True
         requested_on = False if force_off else requested_on
         minimum_time = (
             self.compressor_min_on_time if compressor_was_on else self.compressor_min_off_time
@@ -1625,13 +1735,23 @@ class ASHPHeater(HeatPumpHeater):
             self.speed_idx = self.n_speeds if requested_on else 0
         return requested_on
 
-    def run_er_thermostat_control(self):
+    def run_er_thermostat_control(self, hp_running=None):
         """Dispatch discrete ER stages using a temperature-recovery timer."""
         temp_indoor = self.zone.temperature
 
         # Defrost dispatch is independent of normal ER staging. Pause the
         # normal stage and escalation timer until the reverse-cycle event ends.
-        if self.defrost_model == 'Discrete' and self.defrost_remaining > dt.timedelta():
+        pause_for_defrost = self.defrost_model == 'Discrete' and self.defrost_remaining > dt.timedelta()
+        if pause_for_defrost and getattr(self, 'defrost_er_pause_requires_compressor', False):
+            if hp_running is None:
+                hp_running = 'HP' in self.mode
+            outdoor = self.current_schedule['Ambient Dry Bulb (C)']
+            pause_for_defrost = (
+                hp_running and self.current_schedule.get('Voltage (-)', 1) != 0
+                and outdoor < self.defrost_temp_threshold
+                and (self.hp_lockout_temp is None or outdoor >= self.hp_lockout_temp)
+            )
+        if pause_for_defrost:
             return 'On' if self.er_stage_idx > 0 else 'Off'
 
         # if the outdoor temp is greater than input value, turn er off
@@ -1754,6 +1874,7 @@ class ASHPHeater(HeatPumpHeater):
         hp_capacity = super().update_capacity()
         if self.use_ideal_capacity and self.use_staged_er_control:
             hp_capacity = self.calculate_staged_ideal_hp_capacity()
+        hp_capacity = self._retain_defrost_capacity(hp_capacity)
         if 'HP' not in self.mode:
             hp_capacity = 0
 
@@ -1853,6 +1974,98 @@ class ASHPHeater(HeatPumpHeater):
         # the ER staging configuration.
         if hasattr(self, 'er_stage_idx'):
             self.reset_er_stages()
+
+
+class DualFuelASHPHeater(ASHPHeater):
+    """Air-source heat pump with natural-gas furnace backup.
+
+    The inherited ``er_*`` state is intentionally reused only for backup
+    dispatch. Furnace sizing and fuel accounting remain independent from all
+    electric-resistance capacity and staging overrides.
+    """
+
+    name = 'Dual Fuel ASHP Heater'
+    performance_name = 'ASHP Heater'
+    is_gas = True
+
+    def __init__(self, **kwargs):
+        resstock_capacity = kwargs.get('ResStock Backup Heating Capacity (W)')
+        furnace_capacity = kwargs.get('Furnace Backup Capacity (W)', resstock_capacity)
+        if furnace_capacity is None:
+            raise OCHREException(
+                'Dual Fuel ASHP Heater requires Furnace Backup Capacity (W) '
+                'or ResStock Backup Heating Capacity (W).'
+            )
+        if furnace_capacity <= 0:
+            raise OCHREException('Furnace Backup Capacity (W) must be greater than zero.')
+
+        furnace_afue = kwargs.get('Furnace Backup AFUE (-)')
+        if furnace_afue is None or not 0 < furnace_afue <= 1:
+            raise OCHREException('Furnace Backup AFUE (-) must be in (0, 1].')
+
+        # ASHPHeater owns the shared backup controller. Feed it only the
+        # furnace-specific values and remove ER stage inputs so panel-related
+        # overrides cannot resize the gas furnace.
+        dual_fuel_kwargs = dict(kwargs)
+        dual_fuel_kwargs['Backup Capacity (W)'] = furnace_capacity
+        dual_fuel_kwargs['Backup EIR (-)'] = 1 / furnace_afue
+        dual_fuel_kwargs.pop('Number of Backup Stages (-)', None)
+        dual_fuel_kwargs.pop('Backup Stage Capacities (W)', None)
+
+        super().__init__(**dual_fuel_kwargs)
+        self.resstock_backup_capacity = resstock_capacity
+        self.furnace_capacity_rated = furnace_capacity
+        self.furnace_afue = furnace_afue
+
+    def configure_er_stages(
+        self,
+        capacity,
+        number_of_stages=None,
+        stage_capacities=None,
+        force_staging=False,
+    ):
+        """Use one exact-capacity furnace stage without ER element rounding."""
+        return [0, capacity]
+
+    def calculate_power_and_heat(self):
+        super().calculate_power_and_heat()
+
+        scale = self.space_fraction
+        furnace_input_kw = self.er_capacity * self.er_eir_rated * scale / 1000
+        if self.defrost_model == 'Discrete' and self.defrost_active_fraction > 0:
+            hp_input_kw = self.hp_power * scale / 1000
+        else:
+            total_main_input_kw = abs(self.capacity) * self.eir * scale / 1000
+            hp_input_kw = max(total_main_input_kw - furnace_input_kw, 0)
+
+        # The compressor and shared blower are electric; only the furnace
+        # burner input is gas.
+        self.electric_kw = hp_input_kw + self.fan_power / 1000
+        self.gas_therms_per_hour = furnace_input_kw * kwh_to_therms
+
+    def generate_results(self):
+        results = super().generate_results()
+
+        if self.verbosity >= 7:
+            replacements = {
+                'ER Power (kW)': 'Furnace Input (kW)',
+                'ER Stage (-)': 'Furnace Stage (-)',
+                'ER Number of Stages (-)': 'Furnace Number of Stages (-)',
+                'ER Capacity (W)': 'Furnace Capacity (W)',
+                'ER Rated Capacity (W)': 'Furnace Rated Capacity (W)',
+                'ER Staged Control Active (-)': 'Furnace Staged Control Active (-)',
+                'ER Stage Timer (minutes)': 'Furnace Stage Timer (minutes)',
+                'Defrost ER Strategy': 'Defrost Furnace Strategy',
+                'Defrost ER Commanded Stage (-)': 'Defrost Furnace Commanded Stage (-)',
+                'Defrost ER Capacity (W)': 'Defrost Furnace Capacity (W)',
+            }
+            for old_suffix, new_suffix in replacements.items():
+                old_name = f'{self.end_use} {old_suffix}'
+                if old_name in results:
+                    results[f'{self.end_use} {new_suffix}'] = results.pop(old_name)
+            results[f'{self.end_use} Mode'] = self.mode.replace('ER', 'Furnace')
+
+        return results
 
 
 class MinisplitAHSPHeater(MinisplitHVAC, ASHPHeater):

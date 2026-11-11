@@ -25,8 +25,11 @@ class Simulator:
         self.sub_simulators = []  # list of simulators included within self (e.g., Equipment in a Dwelling)
 
         # Timing parameters
-        self.start_time = start_time  # Note: may be updated later with time zone
-        self.current_time = start_time
+        # Keep an aware clock as a pandas Timestamp. Timestamp arithmetic advances
+        # by elapsed time across daylight-saving transitions, whereas datetime
+        # arithmetic with a local tzinfo can skip or repeat the wrong instant.
+        self.start_time = pd.Timestamp(start_time)  # Dwelling may add a time zone later
+        self.current_time = self.start_time
         self.time_res = time_res
         self.duration = duration
         if self.duration < self.time_res:
@@ -283,7 +286,7 @@ class Simulator:
         if remove_results:
             self.results.clear()
 
-        self.current_time = start_time
+        self.current_time = pd.Timestamp(start_time)
 
         # reset schedule_iterable
         if not self.schedule.empty:
@@ -349,7 +352,7 @@ class Simulator:
 
     def simulate(self, start_time=None, duration=None, verbosity=None):
         if start_time is not None:
-            self.start_time = start_time
+            self.start_time = pd.Timestamp(start_time)
         if self.start_time != self.current_time:
             self.reset_time(self.start_time)
         if duration is not None:
