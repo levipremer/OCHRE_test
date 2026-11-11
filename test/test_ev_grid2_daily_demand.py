@@ -17,6 +17,9 @@ from test.test_ev_home_hub_grid_study import fixture, fixed_base
 
 
 def build(controller, scenarios, powers):
+    # Synthetic pre-issue meter history for the first rolling window.
+    if not controller._completed_plant_rows:
+        observations(controller, scenarios.issued_at - pd.Timedelta(minutes=15), [0.] * 15)
     with patch.object(EVScenarioController, "build_problem",
                       return_value=fixed_base(scenarios, powers)):
         problem, plan = controller.build_problem(scenarios.issued_at, .5, scenarios)
@@ -32,7 +35,7 @@ def observations(controller, start, values):
     ]
 
 
-def test_two_components_have_distinct_shared_scenario_maxima_and_n32_scaling():
+def test_complete_scenario_cost_prevents_mixing_component_maxima_and_keeps_n32():
     c, _, scenarios = fixture(WINTER_TOU_DEMAND_CPP, "2025-12-01 05:30")
     first, second = np.zeros(32), np.zeros(32)
     first[2:4] = 12.0  # Scenario 0 establishes the on-peak 22 kW maximum.
@@ -42,10 +45,13 @@ def test_two_components_have_distinct_shared_scenario_maxima_and_n32_scaling():
     np.testing.assert_allclose(plan["daily_anytime_demand_kw"].value, [40])
     assert plan["daily_demand_normalization_steps"] == 32
     assert plan["daily_demand_scale"] == pytest.approx(.25 / 32)
-    assert problem.value == pytest.approx(.25 / 32 * (ON_RATE * 22 + ANY_RATE * 40))
+    expected = .25 / 32 * np.array([ON_RATE * 22 + ANY_RATE * 22,
+                                   ON_RATE * 10 + ANY_RATE * 40])
+    np.testing.assert_allclose(plan["daily_demand_cost_scenarios"].value, expected)
+    assert problem.value == pytest.approx(expected.max())
+    assert problem.value < .25 / 32 * (ON_RATE * 22 + ANY_RATE * 40)
     assert set(plan["objective_terms"]) == {"electricity", "modeled_home_peak"}
-    assert plan["daily_demand_objective_terms"]["on_peak"].value == pytest.approx(.25 / 32 * ON_RATE * 22)
-    assert plan["daily_demand_objective_terms"]["anytime"].value == pytest.approx(.25 / 32 * ANY_RATE * 40)
+    assert plan["daily_demand_objective_terms"]["worst_scenario"].value == pytest.approx(expected.max())
 
 
 def test_full_week_uses_n672_and_sums_five_independent_weekdays():
@@ -66,7 +72,7 @@ def test_full_week_uses_n672_and_sums_five_independent_weekdays():
     assert len(plan["daily_demand_days"]) == 5
     assert plan["daily_demand_normalization_steps"] == 672
     assert plan["daily_demand_scale"] == pytest.approx(.25 / 672)
-    assert len(plan["daily_demand_block_starts"]) == 5 * 48
+    assert len(plan["daily_demand_block_starts"]) == 5 * 95
     assert problem.value == pytest.approx(.25 / 672 * (ON_RATE * 65 + ANY_RATE * 110))
 
 
@@ -107,7 +113,7 @@ def test_midblock_anytime_demand_combines_actual_and_forecast_then_positive_part
     np.testing.assert_allclose(plan["daily_demand_block_power_scenarios_kw"].value[:, 0], [10, 20])
     np.testing.assert_allclose(plan["daily_anytime_demand_kw"].value, [20])
     np.testing.assert_allclose(plan["daily_on_peak_demand_kw"].value, [0])
-    assert plan["daily_demand_block_starts"][-1] == pd.Timestamp("2025-12-01 16:30")
+    assert plan["daily_demand_block_starts"][-1] == pd.Timestamp("2025-12-01 16:45")
     assert plan["peak_demand_block_starts"] == ()  # 17:00–17:30 is not fully covered.
     assert problem.value == pytest.approx(.25 / 32 * ANY_RATE * 20)
     c._completed_plant_rows.pop()
@@ -118,7 +124,7 @@ def test_midblock_anytime_demand_combines_actual_and_forecast_then_positive_part
 def test_positive_part_applies_to_signed_thirty_minute_mean_not_each_quarter():
     c, _, scenarios = fixture(WINTER_TOU_DEMAND_CPP, "2025-12-01 06:00", load=0)
     power = np.zeros(32)
-    power[:2] = [-20, 10]  # Signed mean is -5, rather than mean positive import5.
+    power[:] = [-20, 10] * 16  # Signed mean is -5, rather than mean positive import5.
     problem, plan = build(c, scenarios, [power, power])
     assert problem.value == pytest.approx(0)
     np.testing.assert_allclose(plan["daily_on_peak_demand_kw"].value, [0])

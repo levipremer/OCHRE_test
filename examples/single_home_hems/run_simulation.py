@@ -166,6 +166,9 @@ def build_device_controllers(
     hvac_dwell_on_minutes: float = 60.0,
     hvac_dwell_off_minutes: float = 15.0,
     hvac_gain_regime: HVACInternalGainRegime | None = None,
+    hvac_max_deviation_slack_weight: float = 10_000.0,
+    hvac_horizon_hours: float | None = None,
+    hvac_solver_options: dict[str, float | int] | None = None,
 ) -> tuple[DeviceController, ...]:
     """Build the selected set of independently testable device controllers."""
     if selection not in CONTROLLER_CHOICES:
@@ -205,7 +208,7 @@ def build_device_controllers(
             water_heater_options["legionella_cooldown_enabled"] = water_heater_legionella_cooldown_enabled
         controllers.append(WaterHeaterPredictiveController(**water_heater_options))
     if selection in {"hvac", "all"}:
-        controllers.append(HVACPredictiveController(
+        hvac_options = dict(
             optimization_kind=hvac_optimization,
             solver=hvac_solver,
             comfort_band_c=hvac_comfort_band_c,
@@ -216,13 +219,19 @@ def build_device_controllers(
             degree_hour_limit_c_hours=hvac_degree_hour_limit_c_hours,
             max_deviation_c=hvac_max_deviation_c,
             degree_hour_slack_weight=hvac_degree_hour_slack_weight,
+            max_deviation_slack_weight=hvac_max_deviation_slack_weight,
             enforce_cycle_limit=hvac_enforce_cycle_limit,
             enforce_dwell_constraints=hvac_enforce_dwell_constraints,
             max_cycles=hvac_max_cycles,
             dwell_time_on=dt.timedelta(minutes=hvac_dwell_on_minutes),
             dwell_time_off=dt.timedelta(minutes=hvac_dwell_off_minutes),
             gain_regime=hvac_gain_regime or HVACInternalGainRegime(),
-        ))
+        )
+        if hvac_horizon_hours is not None:
+            hvac_options["horizon"] = dt.timedelta(hours=hvac_horizon_hours)
+        if hvac_solver_options:
+            hvac_options["solver_options"] = dict(hvac_solver_options)
+        controllers.append(HVACPredictiveController(**hvac_options))
     if selection in {"ev", "all"}:
         controllers.append(EVPredictiveController(ev_names=ev_names))
     return tuple(controllers)
@@ -310,6 +319,26 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="CVXPY solver for HVAC optimization (default: GUROBI)",
     )
     parser.add_argument(
+        "--hvac-horizon-hours", type=float,
+        help="HVAC prediction horizon in hours (default: controller's 12 hours)",
+    )
+    parser.add_argument(
+        "--hvac-warmup-hours", type=float,
+        help="Measured native HVAC warm-up before evaluation (default: simulator's 12 hours)",
+    )
+    parser.add_argument(
+        "--hvac-time-limit-seconds", type=float,
+        help="Optional Gurobi per-solve time limit in seconds",
+    )
+    parser.add_argument(
+        "--hvac-mip-gap", type=float,
+        help="Optional Gurobi relative MIP gap target as a fraction from 0 to 1",
+    )
+    parser.add_argument(
+        "--hvac-solver-threads", type=int,
+        help="Optional Gurobi solver thread count",
+    )
+    parser.add_argument(
         "--hvac-comfort-band-c", type=float, default=1.5,
         help="Comfort band in C around the training heating setpoint (default: 1.5)",
     )
@@ -340,6 +369,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hvac-degree-hour-slack-weight", type=float, default=100.0,
         help="Penalty on degree-hour budget slack before horizon-step averaging (default: 100.0)",
+    )
+    parser.add_argument(
+        "--hvac-max-deviation-slack-weight", type=float, default=10_000.0,
+        help="Penalty on instantaneous deviation-cap slack (default: 10000.0)",
     )
     parser.add_argument(
         "--hvac-cycle-limit", choices=("on", "off"), default="off",
@@ -512,9 +545,32 @@ def main(args: argparse.Namespace | None = None) -> int:
         ("--hvac-degree-hour-limit-c-hours", args.hvac_degree_hour_limit_c_hours),
         ("--hvac-max-deviation-c", args.hvac_max_deviation_c),
         ("--hvac-degree-hour-slack-weight", args.hvac_degree_hour_slack_weight),
+        ("--hvac-max-deviation-slack-weight", args.hvac_max_deviation_slack_weight),
     ):
         if not 0 <= value < float("inf"):
             raise ValueError(f"{name} must be finite and nonnegative")
+    if args.hvac_horizon_hours is not None:
+        if not 0 < args.hvac_horizon_hours < float("inf"):
+            raise ValueError("--hvac-horizon-hours must be finite and positive")
+        if pd.Timedelta(hours=args.hvac_horizon_hours) % pd.Timedelta(minutes=15):
+            raise ValueError("--hvac-horizon-hours must contain whole 15-minute intervals")
+    if args.hvac_warmup_hours is not None and not 0 <= args.hvac_warmup_hours < float("inf"):
+        raise ValueError("--hvac-warmup-hours must be finite and nonnegative")
+    if args.hvac_time_limit_seconds is not None and not 0 < args.hvac_time_limit_seconds < float("inf"):
+        raise ValueError("--hvac-time-limit-seconds must be finite and positive")
+    if args.hvac_mip_gap is not None and not 0 <= args.hvac_mip_gap <= 1:
+        raise ValueError("--hvac-mip-gap must be a fraction between zero and one")
+    if args.hvac_mip_gap is not None and args.hvac_optimization != "mixed integer":
+        raise ValueError("--hvac-mip-gap requires --hvac-optimization 'mixed integer'")
+    if args.hvac_solver_threads is not None and args.hvac_solver_threads < 1:
+        raise ValueError("--hvac-solver-threads must be positive")
+    if any(value is not None for value in (
+        args.hvac_time_limit_seconds, args.hvac_mip_gap, args.hvac_solver_threads,
+    )):
+        if args.controller not in {"hvac", "all"}:
+            raise ValueError("HVAC solver options require an HVAC controller")
+        if args.hvac_solver != "GUROBI":
+            raise ValueError("HVAC solver options are supported only with GUROBI")
     if args.hvac_max_cycles < 1:
         raise ValueError("--hvac-max-cycles must be positive")
     for name, value in (
@@ -556,6 +612,9 @@ def main(args: argparse.Namespace | None = None) -> int:
             config,
             time_step=dt.timedelta(minutes=args.time_step_minutes),
         )
+    if (args.hvac_warmup_hours is not None
+            and pd.Timedelta(hours=args.hvac_warmup_hours) % pd.Timedelta(config.time_step)):
+        raise ValueError("--hvac-warmup-hours must contain whole plant timesteps")
     if args.duration_hours is not None:
         if args.duration_hours <= 0:
             raise ValueError("--duration-hours must be positive")
@@ -681,12 +740,21 @@ def main(args: argparse.Namespace | None = None) -> int:
         hvac_degree_hour_limit_c_hours=args.hvac_degree_hour_limit_c_hours,
         hvac_max_deviation_c=args.hvac_max_deviation_c,
         hvac_degree_hour_slack_weight=args.hvac_degree_hour_slack_weight,
+        hvac_max_deviation_slack_weight=args.hvac_max_deviation_slack_weight,
         hvac_enforce_cycle_limit=args.hvac_cycle_limit == "on",
         hvac_enforce_dwell_constraints=args.hvac_dwell_constraints == "on",
         hvac_max_cycles=args.hvac_max_cycles,
         hvac_dwell_on_minutes=args.hvac_dwell_on_minutes,
         hvac_dwell_off_minutes=args.hvac_dwell_off_minutes,
         hvac_gain_regime=hvac_gain_regime,
+        hvac_horizon_hours=args.hvac_horizon_hours,
+        hvac_solver_options={
+            key: value for key, value in (
+                ("TimeLimit", args.hvac_time_limit_seconds),
+                ("MIPGap", args.hvac_mip_gap),
+                ("Threads", args.hvac_solver_threads),
+            ) if value is not None
+        },
     )
     summary = SingleHomeHEMSSimulation(
         config,
@@ -700,6 +768,8 @@ def main(args: argparse.Namespace | None = None) -> int:
         water_draw_start=args.water_draw_start,
         weather_archive=weather_archive,
         save_optimizer_plan_figures=not args.skip_optimizer_plan_figures,
+        **({"hvac_warmup_duration": pd.Timedelta(hours=args.hvac_warmup_hours)}
+           if args.hvac_warmup_hours is not None else {}),
     ).run()
     if args.rate_structure != "legacy":
         price = summary.controls["electricity_price_usd_per_kwh"]

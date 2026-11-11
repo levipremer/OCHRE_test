@@ -19,6 +19,10 @@ import pandas as pd
 from examples.five_home_block.five_home_block.ev_degradation import turning_points
 
 from ..control_forecasts import EVScenarioSet
+from ..demand_objective import scenario_demand_objective, demand_cost_metadata
+from ..demand_windows import (
+    completed_demand_windows, demand_window_is_weekday, demand_window_is_on_peak,
+)
 from ..ev_hub_forecast import EVHubIntervalForecast, INTERVAL, MOBILITY_SPLIT_POLICIES
 from ..ev_home_hub_trace import predicted_trip_energy_fields
 from ..forecast import Forecast, PRICE_COLUMN
@@ -126,6 +130,9 @@ class EVHomeHubController(EVScenarioController):
         if isinstance(scenario_count, bool) or not isinstance(scenario_count, int) or scenario_count < 1:
             raise ValueError("EV Home Hub scenario count must be a positive integer")
         self.hub_forecast_provider = hub_forecast_provider
+        self.include_circuit_meters = bool(
+            getattr(hub_forecast_provider, "requires_circuit_history", False)
+        )
         self.outside_hub_forecast = outside_hub_forecast
         self.include_total_home_meter = rate_structure != "legacy" or bool(
             getattr(outside_hub_forecast, "requires_total_home_meter", False)
@@ -204,7 +211,7 @@ class EVHomeHubController(EVScenarioController):
         return timestamp if timestamp.tz is None else timestamp.tz_convert(LOCAL_TIMEZONE)
 
     def _observed_daily_demand_peaks(self, timestamp):
-        """Positive net-import maxima from complete, causal 30-minute blocks.
+        """Positive net-import maxima from causal rolling 30-minute windows.
 
         Meter timestamps denote interval completion. Restrict live history to
         the current local day and the controller's evaluation period; warmup
@@ -223,7 +230,7 @@ class EVHomeHubController(EVScenarioController):
                 if not np.isfinite(value) or value < 0:
                     raise ValueError("Restored daily demand peaks must be finite and nonnegative")
                 peaks[key] = max(peaks[key], value)
-        by_block = {}
+        readings = []
         for completed, row in self._completed_plant_rows:
             completed = pd.Timestamp(completed)
             start = completed - pd.Timedelta(minutes=1)
@@ -234,30 +241,28 @@ class EVHomeHubController(EVScenarioController):
             value = float(row[TOTAL_POWER_KEY])
             if not np.isfinite(value):
                 raise ValueError("Completed whole-home meter power must be finite")
-            by_block.setdefault(start.floor("30min"), []).append((completed, value))
-        for block_start, readings in by_block.items():
-            expected = pd.date_range(block_start + pd.Timedelta(minutes=1),
-                                     periods=30, freq="min")
-            if expected[-1] > timestamp or [time for time, _ in readings] != list(expected):
-                continue
-            mean_import = max(0.0, float(np.mean([value for _, value in readings])))
+            readings.append((start, value))
+        power = pd.Series([v for _, v in readings],
+                          index=pd.DatetimeIndex([t for t, _ in readings]), dtype=float)
+        for block_start, mean in completed_demand_windows(power).items():
+            mean_import = max(0.0, float(mean))
             peaks["anytime_kw"] = max(peaks["anytime_kw"], mean_import)
-            if WinterTOURate.is_on_peak(block_start):
+            if demand_window_is_on_peak(block_start):
                 peaks["on_peak_kw"] = max(peaks["on_peak_kw"], mean_import)
         return {day.isoformat(): peaks}
 
     def _build_daily_grid2_demand(self, power, starts):
-        """Shared daily/component scenario maxima, with fixed 0.25/N scaling."""
+        """Worst complete scenario demand cost, with fixed 0.25/N scaling."""
         blocks, block_starts = [], []
         active = np.zeros(len(starts), dtype=bool)
         observed_first_half = None
-        if starts[0].minute % 30 == 15 and self._demand_local_time(starts[0]).weekday() < 5:
+        if demand_window_is_weekday(starts[0] - INTERVAL):
             block_start = starts[0] - INTERVAL
             expected = pd.date_range(block_start + pd.Timedelta(minutes=1), starts[0], freq="min")
             observed = [(time, row[TOTAL_POWER_KEY]) for time, row in self._completed_plant_rows
                         if block_start < time <= starts[0]]
             if [time for time, _ in observed] != list(expected):
-                raise ValueError("Grid 2 daily demand needs 15 completed whole-home meter minutes before a mid-block decision")
+                raise ValueError("Grid 2 daily demand needs 15 completed whole-home meter minutes before a rolling-demand decision")
             observed_first_half = float(np.mean([value for _, value in observed]))
             if not np.isfinite(observed_first_half):
                 raise ValueError("Completed whole-home meter power must be finite")
@@ -265,13 +270,13 @@ class EVHomeHubController(EVScenarioController):
             block_starts.append(block_start)
             active[0] = True
         for index, start in enumerate(starts[:-1]):
-            if start.minute % 30 == 0 and self._demand_local_time(start).weekday() < 5:
+            if demand_window_is_weekday(start):
                 blocks.append((power[:, index] + power[:, index + 1]) / 2)
                 block_starts.append(start)
                 active[index:index + 2] = True
         block_starts = tuple(block_starts)
         block_power = cp.vstack(blocks).T if blocks else None
-        on_peak = np.array([WinterTOURate.is_on_peak(t) for t in block_starts], dtype=bool)
+        on_peak = np.array([demand_window_is_on_peak(t) for t in block_starts], dtype=bool)
         local_days = tuple(dict.fromkeys(self._demand_local_time(t).normalize() for t in starts
                                         if self._demand_local_time(t).weekday() < 5))
         observed = self._observed_daily_demand_peaks(starts[0])
@@ -281,32 +286,21 @@ class EVHomeHubController(EVScenarioController):
                                  for day in local_days])
         scale = (INTERVAL.total_seconds() / 3600) / len(starts)
         constraints = []
-        if local_days:
-            on = cp.Variable(len(local_days), nonneg=True, name="ev_only_daily_on_peak_demand_kw")
-            anytime = cp.Variable(len(local_days), nonneg=True, name="ev_only_daily_anytime_demand_kw")
-            constraints += [on >= observed_on, anytime >= observed_any]
-            for index, day in enumerate(local_days):
-                day_blocks = np.array([self._demand_local_time(t).normalize() == day
-                                       for t in block_starts], dtype=bool)
-                if day_blocks.any():
-                    constraints.append(anytime[index] >= block_power[:, day_blocks])
-                if (day_blocks & on_peak).any():
-                    constraints.append(on[index] >= block_power[:, day_blocks & on_peak])
-            costs = {
-                "on_peak": scale * GRID2_ON_PEAK_DEMAND_USD_PER_KW_DAY * cp.sum(on),
-                "anytime": scale * GRID2_ANYTIME_DEMAND_USD_PER_KW_DAY * cp.sum(anytime),
-            }
-        else:
-            on, anytime = None, None
-            costs = {key: cp.Constant(0.0) for key in ("on_peak", "anytime")}
+        day_masks = [np.array([self._demand_local_time(t).normalize() == day
+                               for t in block_starts], dtype=bool) for day in local_days]
+        demand = scenario_demand_objective(
+            block_power, day_masks, on_peak, observed_on, observed_any,
+            power.shape[0], scale)
+        costs = demand["daily_demand_objective_terms"]
         peak_starts = tuple(t for t, selected in zip(block_starts, on_peak) if selected)
         peak_active = np.zeros(len(starts), dtype=bool)
         for lead, start in enumerate(starts):
-            peak_active[lead] = start.floor("30min") in peak_starts
+            peak_active[lead] = start in peak_starts or start - INTERVAL in peak_starts
         return {
             "constraints": constraints,
+            "daily_demand_window_minutes": 30, "daily_demand_window_step_minutes": 15,
             "daily_demand_days": local_days,
-            "daily_on_peak_demand_kw": on, "daily_anytime_demand_kw": anytime,
+            **demand,
             "daily_demand_observed_on_peak_kw": observed_on,
             "daily_demand_observed_anytime_kw": observed_any,
             "daily_demand_observed_peaks": observed,
@@ -326,10 +320,11 @@ class EVHomeHubController(EVScenarioController):
         }
 
     def observe_plant_step(self, timestamp: pd.Timestamp, status: Mapping[str, Any]) -> None:
-        """Record only the Hub meter and EV submeter at interval completion."""
+        """Record only the configured electrical meters at interval completion."""
         validate_ev_only_hub_observation(
             status, self.equipment_name,
             include_total_home=self.include_total_home_meter,
+            include_circuits=self.include_circuit_meters,
         )
         completed_at = pd.Timestamp(timestamp) + pd.Timedelta(minutes=1)
         if self._completed_plant_rows and completed_at <= self._completed_plant_rows[-1][0]:
@@ -345,6 +340,7 @@ class EVHomeHubController(EVScenarioController):
             columns=observation_keys(
                 self.equipment_name,
                 include_total_home=self.include_total_home_meter,
+                include_circuits=self.include_circuit_meters,
             ),
         )
         if not history.empty and history.index[-1] > timestamp:
@@ -752,9 +748,7 @@ class EVHomeHubController(EVScenarioController):
                 if self.uses_daily_grid2_demand:
                     daily_fields = {
                         "daily_demand_days": [day.isoformat() for day in plan["daily_demand_days"]],
-                        "daily_demand_objective_terms": {
-                            key: float(value.value) for key, value in plan["daily_demand_objective_terms"].items()
-                        },
+                        **demand_cost_metadata(plan),
                         "daily_demand_observed_peaks": plan["daily_demand_observed_peaks"],
                         "daily_demand_block_starts": [str(value) for value in plan["daily_demand_block_starts"]],
                         "daily_demand_block_power_scenarios_kw": (
@@ -768,6 +762,7 @@ class EVHomeHubController(EVScenarioController):
                                 "daily_demand_block_is_on_peak", "daily_demand_active"):
                         daily_fields[key] = plan[key].tolist()
                     for key in ("daily_demand_scale", "daily_demand_step_hours",
+                                "daily_demand_window_minutes", "daily_demand_window_step_minutes",
                                 "daily_demand_normalization_steps", "daily_demand_on_peak_rate_usd_per_kw_day",
                                 "daily_demand_anytime_rate_usd_per_kw_day"):
                         daily_fields[key] = plan[key]
@@ -819,11 +814,18 @@ class EVHomeHubController(EVScenarioController):
                 trip_fields = predicted_trip_energy_fields(path) if h is not None else None
                 for lead, target in enumerate(starts):
                     block_start = target.floor("30min")
+                    if self.uses_daily_grid2_demand:
+                        # Each quarter belongs to up to two windows. Report the
+                        # binding on-peak window; full window arrays are saved too.
+                        candidates = [t for t in (target - INTERVAL, target)
+                                      if t in demand_block_index]
+                        block_start = max(candidates, key=lambda t: demand_power[
+                            index, demand_block_index[t]]) if candidates else target
                     demand_index = demand_block_index.get(block_start)
                     demand_kw = (np.nan if demand_index is None else float(demand_power[index, demand_index]))
                     peak_lhs = demand_kw if self.peak_window == "winter_tou" else float(home[index, lead])
                     daily_index = daily_indices.get(self._demand_local_time(target).normalize())
-                    row_peak_value = (float(plan["daily_on_peak_demand_kw"].value[daily_index])
+                    row_peak_value = (float(plan["daily_on_peak_demand_scenarios_kw"].value[index, daily_index])
                                       if daily_index is not None else peak_value)
                     prediction_row = {
                         "issued_at": pd.Timestamp(timestamp),
@@ -865,11 +867,15 @@ class EVHomeHubController(EVScenarioController):
                         ),
                     }
                     if self.uses_daily_grid2_demand:
-                        daily_block_index = daily_blocks.get(block_start)
+                        candidates = [t for t in (target - INTERVAL, target) if t in daily_blocks]
+                        daily_start = max(candidates, key=lambda t:
+                            plan["daily_demand_block_power_scenarios_kw"].value[
+                                index, daily_blocks[t]]) if candidates else target
+                        daily_block_index = daily_blocks.get(daily_start)
                         daily_power = (np.nan if daily_block_index is None else float(
                             plan["daily_demand_block_power_scenarios_kw"].value[index, daily_block_index]))
                         anytime_value = (np.nan if daily_index is None else float(
-                            plan["daily_anytime_demand_kw"].value[daily_index]))
+                            plan["daily_anytime_demand_scenarios_kw"].value[index, daily_index]))
                         prediction_row.update(
                             grid2_demand_formulation=self.grid2_demand_formulation,
                             daily_demand_day=(None if daily_index is None
@@ -877,6 +883,8 @@ class EVHomeHubController(EVScenarioController):
                             daily_demand_scale=plan["daily_demand_scale"],
                             daily_on_peak_demand_kw=(np.nan if daily_index is None else row_peak_value),
                             daily_anytime_demand_kw=anytime_value,
+                            daily_demand_block_start=(daily_start if daily_block_index is not None else None),
+                            daily_demand_window_step_minutes=15,
                             daily_demand_block_power_kw=daily_power,
                             daily_anytime_demand_active=bool(plan["daily_demand_active"][lead]),
                             daily_anytime_constraint_margin_kw=anytime_value - daily_power,
@@ -942,6 +950,7 @@ class EVHomeHubController(EVScenarioController):
             validate_ev_only_hub_observation(
                 previous_status, self.equipment_name,
                 include_total_home=self.include_total_home_meter,
+                include_circuits=self.include_circuit_meters,
             )
         if set(current_schedule) - {PRICE_COLUMN}:
             raise ValueError("EV Home Hub control cannot receive equipment schedule inputs")

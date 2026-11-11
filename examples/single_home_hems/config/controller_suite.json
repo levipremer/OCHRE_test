@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "output_directory": "../outputs/controller_suite_runs",
+  "selected": [
+    "hvac_only"
+  ],
+  "variants": {
+    "hvac_only": {
+      "controller": "hvac_only",
+      "arguments": {
+        "home_id": "home_01",
+        "source_config_directory": "oikolab_2025_2026",
+        "start_time": "2026-01-03T00:00:00",
+        "duration_hours": 1,
+        "rate_structure": "tou-winter",
+        "weather_forecast_mode": "predict",
+        "hvac_optimization": "mixed integer",
+        "hvac_solver": "GUROBI",
+        "hvac_horizon_hours": 8,
+        "hvac_warmup_hours": 16,
+        "hvac_comfort_band_c": 1.5,
+        "hvac_comfort_weight": 0,
+        "hvac_persistence_weight": 0.1,
+        "hvac_degree_hour_budget": "on",
+        "hvac_instantaneous_cap": "on",
+        "hvac_degree_hour_limit_c_hours": 2,
+        "hvac_max_deviation_c": 1,
+        "hvac_degree_hour_slack_weight": 100,
+        "hvac_max_deviation_slack_weight": 10000,
+        "hvac_cycle_limit": "off",
+        "hvac_dwell_constraints": "off",
+        "hvac_time_limit_seconds": 300,
+        "hvac_mip_gap": 0.05,
+        "hvac_solver_threads": 1,
+        "skip_optimizer_plan_figures": true
+      },
+      "description": "Eight-hour standalone HVAC MILP from the recent joint thermal formulation"
+    },
+    "water_heater_only": {
+      "controller": "water_heater_only",
+      "arguments": {
+        "home_id": "home_01",
+        "source_config_directory": "oikolab_2025_2026",
+        "start_time": "2026-01-03T00:00:00",
+        "duration_hours": 1,
+        "rate_structure": "tou-winter",
+        "water_heater_model": "rc",
+        "water_heater_optimization": "milp",
+        "water_heater_solver": "GUROBI",
+        "water_heater_horizon_hours": 8,
+        "forecast_type": "scenario",
+        "scenario_method": "rmse_volume_6h_k7_rf_1",
+        "water_draw_file": "../external_data/water_flow_dchouse_l_per_min.csv",
+        "water_draw_start": "2025-11-06T00:00:00",
+        "water_heater_comfort_weight": 0.1,
+        "water_heater_legionella_weight": 0.001,
+        "water_heater_persistence_weight": 1,
+        "water_heater_cycle_limit": "off",
+        "water_heater_dwell_constraints": "off",
+        "skip_optimizer_plan_figures": true
+      },
+      "description": "Standalone RC scenario MILP water heater"
+    },
+    "joint_thermal": {
+      "controller": "joint_thermal",
+      "arguments": {
+        "home_id": "home_01",
+        "source_config_directory": "oikolab_2025_2026",
+        "start_time": "2026-01-03T00:00:00",
+        "duration_hours": 1,
+        "weather_forecast_mode": "predict",
+        "water_draw_start": "2025-11-06T00:00:00",
+        "scenario_count": 7,
+        "hpwh_variant": "persistence",
+        "hpwh_comfort_weight": 0.1,
+        "hpwh_legionella_weight": 0.001,
+        "hpwh_persistence_weight": 1,
+        "hvac_comfort_band_c": 1.5,
+        "hvac_persistence_weight": 0.1,
+        "hvac_degree_hour_limit_c_hours": 2,
+        "hvac_degree_hour_slack_weight": 100,
+        "hvac_max_deviation_c": 1,
+        "peak_weight_usd_per_kw": 0.005,
+        "peak_window": "all",
+        "time_limit_seconds": 300,
+        "mip_gap": 0.05,
+        "solver_threads": 1,
+        "skip_optimizer_plan_figures": true
+      },
+      "description": "One coupled HVAC and water-heater MILP; native EV"
+    },
+    "bidirectional_charger_only": {
+      "controller": "bidirectional_charger_only",
+      "arguments": {
+        "home_id": "home_01",
+        "source_config_directory": "oikolab_2025_2026",
+        "start_time": "2025-11-30T00:00:00",
+        "source_start": "2026-09-22T00:00:00",
+        "water_draw_start": "2025-11-06T00:00:00",
+        "duration_hours": 1,
+        "horizon_hours": 8,
+        "hub_forecast_mode": "submeter_rf",
+        "hub_rf_artifact": "../inputs/predictive/models/submeter_hub_rf.joblib",
+        "hub_seed_csv": "../inputs/predictive/seeds/submeter_hub_seed_nov30_2025.csv",
+        "outside_forecast_mode": "rf_multires_weather_persistence",
+        "outside_rf_artifact": "../inputs/predictive/models/outside_hub_er_multires_rf.joblib",
+        "mobility_forecast_mode": "scenario",
+        "ev_scenario_method": "tod_dow_state_hier_limit_persistence",
+        "ev_scenario_count": 7,
+        "rate_structure": "tou-winter",
+        "solver_threads": 1
+      },
+      "description": "Bidirectional charger MPC with circuit-history Hub RF and Outside-Hub weather-persistence RF"
+    },
+    "whole_home_joint": {
+      "controller": "whole_home_joint",
+      "arguments": {
+        "home_id": "home_01",
+        "source_config_directory": "oikolab_2025_2026",
+        "start_time": "2025-12-01T00:00:00",
+        "duration_hours": 1,
+        "rest_source_start": "2026-10-04",
+        "water_draw_start": "2025-11-06T00:00:00",
+        "split_hub_forecast": true,
+        "hub_other_source": "../inputs/predictive/forecasts/hub_other_forecast_source.csv",
+        "outside_hub_source": "../inputs/predictive/forecasts/outside_hub_forecast_source.csv",
+        "ev_scenario_count": 5,
+        "ev_scenario_method": "tod_dow_state_hier_limit_persistence",
+        "weather_forecast_mode": "predict",
+        "rate_structure": "rtp-miso+doe",
+        "solver_threads": 1
+      },
+      "description": "One coupled HVAC, water-heater, and bidirectional EV MILP"
+    }
+  },
+  "_comments": [
+    "Set selected to the case names to run, or override it with --variants. Cases run sequentially into a fresh output root.",
+    "Each arguments object uses its existing runner option names with underscores. Paths in the config are relative to this file; --output-directory on the command line is relative to the current working directory.",
+    "The example cases use different source windows; do not compare their metrics as a matched experiment without aligning all inputs and evaluation windows.",
+    "Changing the daily HVAC setpoint schedule is not yet a controller-suite config option. The January benchmark used an isolated study-specific schedule adapter."
+  ]
+}

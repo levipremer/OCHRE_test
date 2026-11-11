@@ -24,15 +24,14 @@ import pandas as pd
 
 from .runtime_threads import apply_rf_threads
 
+from ..forecasting.evaluate_simulated_home_hub import (
+    HORIZON_STEPS, INTERVAL, WEEK, _model, make_supervised, read_baseline,
+)
 from .ev_hub_forecast import EVHubIntervalForecast
 from .home_hub_observation import HUB_POWER_KEY
 from .prior_day_load_forecast import (
-    EXTENDED_STEPS, INTERVAL, MINUTE, RF_STEPS, prior_complete_local_day,
+    EXTENDED_STEPS, MINUTE, RF_STEPS, prior_complete_local_day,
 )
-
-
-HORIZON_STEPS = RF_STEPS
-WEEK = pd.Timedelta(days=7)
 
 
 ELIGIBLE_TARGETS = (
@@ -84,10 +83,6 @@ def train_four_week_eligible_rf(
     fitting.  Both models have the original hourly origin stride and purged
     complete eight-hour targets.
     """
-    from ..forecasting.evaluate_simulated_home_hub import (
-        _model, make_supervised, read_baseline,
-    )
-
     meter_path = Path(meter_file).expanduser().resolve()
     label_path = Path(private_labels_file).expanduser().resolve()
     weather_path = Path(observed_weather_file).expanduser().resolve()

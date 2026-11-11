@@ -51,7 +51,7 @@ def inputs(c, start, ev_power=None, water_power=None, *, water_count=7, ev_count
         scenario_plans=paths, scenario_shape=(water_count, ev_count), objective_terms={})
 
 
-def solve(c, args, rest=0, observed_half=None):
+def solve(c, args, rest=0, observed_half=0.0):
     steps = args[0].electric_power_kw.shape[1]
     problem = c.optimization_problem_milp(*args, np.full(steps, rest),
                                          observed_first_half_kw=observed_half)
@@ -65,7 +65,7 @@ def observe(c, start, values):
         c.observe_plant_step(t, {"Total Electric Power (kW)": value})
 
 
-def test_joint_daily_components_use_distinct_worst_paired_scenarios_not_their_mean():
+def test_joint_uses_worst_complete_paired_scenario_cost_not_mixed_components():
     c = controller()
     start = pd.Timestamp("2025-12-01 05:30")
     ev = np.zeros((35, 32))
@@ -80,7 +80,12 @@ def test_joint_daily_components_use_distinct_worst_paired_scenarios_not_their_me
     np.testing.assert_allclose(meta["daily_on_peak_demand_kw"], [33])
     np.testing.assert_allclose(meta["daily_anytime_demand_kw"], [51])
     assert meta["daily_demand_scale"] == pytest.approx(.25 / 32)
-    assert problem.value == pytest.approx(.25 / 32 * (ON_RATE * 33 + ANY_RATE * 51))
+    assert problem.value == pytest.approx(.25 / 32 * (ON_RATE * 11 + ANY_RATE * 51))
+    assert problem.value < .25 / 32 * (ON_RATE * 33 + ANY_RATE * 51)
+    assert meta["daily_demand_worst_scenario_index"] == 3
+    assert len(meta["daily_demand_cost_scenarios"]) == 35
+    assert meta["daily_demand_objective_terms"]["on_peak"] == pytest.approx(.25 / 32 * ON_RATE * 11)
+    assert meta["daily_on_peak_demand_scenarios_kw"][34] == [33]
     assert sum(meta["daily_demand_objective_terms"].values()) == pytest.approx(problem.value)
     assert set(c._objective_components) == {"electricity_objective_cost", "modeled_home_peak_objective_cost"}
     assert all(path["water_scenario_index"] == i // 5 and path["ev_scenario_index"] == i % 5
@@ -106,7 +111,7 @@ def test_full_week_sums_five_daily_maxima_with_n672_and_no_weekend_charge():
     assert meta["daily_demand_normalization_steps"] == 672
     assert meta["daily_demand_scale"] == pytest.approx(.25 / 672)
     assert len(meta["daily_demand_days"]) == 5
-    assert len(meta["daily_demand_block_starts"]) == 5 * 48
+    assert len(meta["daily_demand_block_starts"]) == 5 * 95
     np.testing.assert_allclose(meta["daily_on_peak_demand_kw"], np.arange(11, 16))
     np.testing.assert_allclose(meta["daily_anytime_demand_kw"], np.arange(20, 25))
     assert problem.value == pytest.approx(.25 / 672 * (ON_RATE * 65 + ANY_RATE * 110))
@@ -121,7 +126,7 @@ def test_daily_floors_use_complete_earlier_blocks_and_survive_trace_restore():
     history[-10:] = 100  # The complete09:30 block's mean is36, below40.
     observe(c, "2025-12-01", history)
     args = inputs(c, start)
-    problem = solve(c, args, rest=10)
+    problem = solve(c, args, rest=10, observed_half=c._observed_first_half_kw(start))
     meta = c.daily_demand_metadata(solved=True)
     np.testing.assert_allclose(meta["daily_demand_observed_on_peak_kw"], [30])
     np.testing.assert_allclose(meta["daily_demand_observed_anytime_kw"], [40])
@@ -154,7 +159,7 @@ def test_offpeak_midblock_uses_actual_half_for_anytime_max_and_signed_mean():
     assert c._peak_demand_block_starts == ()  # Last17:00 block lacks its second half.
     assert problem.value == pytest.approx(.25 / 32 * ANY_RATE * 20)
     with pytest.raises(ValueError, match="observed first-half"):
-        solve(c, inputs(c, start, profiles))
+        solve(c, inputs(c, start, profiles), observed_half=None)
 
 
 def test_weekend_zero_and_non_grid2_legacy_peak_remains_unchanged():
@@ -163,7 +168,7 @@ def test_weekend_zero_and_non_grid2_legacy_peak_remains_unchanged():
     assert problem.value == 0
     assert c.daily_demand_metadata(solved=True)["daily_demand_days"] == []
     signed = np.zeros((35, 32))
-    signed[:, :2] = [-20, 10]
+    signed[:] = [-20, 10] * 16
     problem = solve(c, inputs(c, "2025-12-01 06:00", signed))
     assert problem.value == 0  # Positive part follows the signed30-minute mean.
     for rate, formulation in (("legacy", "weekday_daily_dt_over_n_v1"),

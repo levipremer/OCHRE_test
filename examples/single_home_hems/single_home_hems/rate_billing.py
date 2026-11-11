@@ -7,6 +7,9 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from .demand_windows import completed_demand_windows, demand_window_is_on_peak
+from .rates import LOCAL_TIMEZONE
+
 
 WINTER_DAILY_DEMAND_RATE_USD_PER_KW = 0.71
 
@@ -32,18 +35,24 @@ def winter_daily_demand_bill(
     *,
     rate_usd_per_kw_day: float = WINTER_DAILY_DEMAND_RATE_USD_PER_KW,
     anytime_rate_usd_per_kw_day: float = 0.0,
+    window_step_minutes: int | None = None,
 ) -> DailyDemandBill:
     """Bill independent weekday on-peak and optional 24-hour maxima.
 
-    Each demand interval is a local-clock-aligned, complete 30-minute block.
+    With the Grid 2 anytime component enabled, complete 30-minute windows
+    advance every 15 minutes and stay inside one local weekday. On-peak windows
+    must be entirely inside one tariff period. The older on-peak-only tariff
+    retains its aligned 30-minute blocks.
+    An explicit ``window_step_minutes=30`` supports auditing historical bills.
     Its demand is the mean signed whole-home meter power, floored at zero to
     obtain net import. The 06:00-08:00 and 17:00-21:00 windows share one daily
     maximum. Only on-peak blocks present in the supplied simulation period are
     billed, so a partial first or last day is identified by ``interval_count``.
     The optional anytime term includes on-peak hours, but has its own maximum.
     Both components exclude weekends. Charges are settled dollars with no
-    optimizer time-step/horizon normalization. Partial eligible blocks and
-    internal minute gaps are rejected; complete blocks in partial days are kept.
+    optimizer time-step/horizon normalization. Internal minute gaps are rejected.
+    Rolling windows require 30 readings,
+    so partial edge windows are omitted; legacy partial blocks are rejected.
     """
     if not isinstance(whole_home_net_power_kw, pd.Series):
         raise TypeError("Whole-home net power must be a pandas Series")
@@ -64,21 +73,33 @@ def winter_daily_demand_bill(
         if isinstance(rate, bool) or not np.isfinite(rate) or rate < 0:
             raise ValueError(f"{name} must be finite and nonnegative")
 
-    blocks = power.resample("30min", closed="left", label="left")
-    means, counts = blocks.mean(), blocks.count()
-    starts = means.index
-    on_peak = (
-        (starts.dayofweek < 5)
-        & (((starts.hour >= 6) & (starts.hour < 8))
-           | ((starts.hour >= 17) & (starts.hour < 21)))
-    )
-    if counts.loc[on_peak].ne(30).any():
-        raise ValueError("Every observed on-peak demand block must have 30 one-minute readings")
-    import_kw = means.loc[on_peak].clip(lower=0)
-    anytime = (starts.dayofweek < 5) & (anytime_rate_usd_per_kw_day > 0)
-    if counts.loc[anytime].ne(30).any():
-        raise ValueError("Every observed anytime demand block must have 30 one-minute readings")
-    anytime_kw = means.loc[anytime].clip(lower=0)
+    if window_step_minutes is None:
+        window_step_minutes = 15 if anytime_rate_usd_per_kw_day > 0 else 30
+    if window_step_minutes not in (15, 30):
+        raise ValueError("Demand window step must be 15 or 30 minutes")
+    if window_step_minutes == 15:
+        if power.index.tz is not None:
+            power = power.tz_convert(LOCAL_TIMEZONE)
+        means = completed_demand_windows(power)
+        on_peak = np.array([demand_window_is_on_peak(t) for t in means.index], dtype=bool)
+        import_kw = means.loc[on_peak].clip(lower=0)
+        anytime_kw = means.clip(lower=0) if anytime_rate_usd_per_kw_day > 0 else means.iloc[:0]
+    else:
+        blocks = power.resample("30min", closed="left", label="left")
+        means, counts = blocks.mean(), blocks.count()
+        starts = means.index
+        on_peak = (
+            (starts.dayofweek < 5)
+            & (((starts.hour >= 6) & (starts.hour < 8))
+               | ((starts.hour >= 17) & (starts.hour < 21)))
+        )
+        if counts.loc[on_peak].ne(30).any():
+            raise ValueError("Every observed on-peak demand block must have 30 one-minute readings")
+        import_kw = means.loc[on_peak].clip(lower=0)
+        anytime = (starts.dayofweek < 5) & (anytime_rate_usd_per_kw_day > 0)
+        if counts.loc[anytime].ne(30).any():
+            raise ValueError("Every observed anytime demand block must have 30 one-minute readings")
+        anytime_kw = means.loc[anytime].clip(lower=0)
     days = import_kw.index.normalize().union(anytime_kw.index.normalize()).unique().sort_values()
     rows = []
     for local_day in days:

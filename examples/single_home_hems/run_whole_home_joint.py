@@ -291,6 +291,7 @@ def validate_split_warmup_window(source_start, source_end, warmup) -> None:
 def _metrics(
     data: pd.DataFrame, price: pd.Series, demand_rate_usd_per_kw_day: float = 0.0,
     *, anytime_demand_rate_usd_per_kw_day: float = 0.0,
+    demand_window_step_minutes: int | None = None,
 ) -> dict[str, float]:
     total = data["total_electric_power_kw"].astype(float)
     price = price.reindex(total.index).astype(float)
@@ -319,6 +320,7 @@ def _metrics(
         winter_daily_demand_bill(
             total, rate_usd_per_kw_day=demand_rate_usd_per_kw_day,
             anytime_rate_usd_per_kw_day=anytime_demand_rate_usd_per_kw_day,
+            window_step_minutes=demand_window_step_minutes,
         )
         if demand_rate_usd_per_kw_day > 0 or anytime_demand_rate_usd_per_kw_day > 0
         else None
@@ -538,6 +540,8 @@ def main(argv: list[str] | None = None) -> int:
             ("peak_weight_usd_per_kw", effective_peak_weight),
             ("grid2_demand_formulation", controller.grid2_demand_formulation
              if args.rate_structure == WINTER_TOU_DEMAND_CPP else None),
+            ("grid2_demand_aggregation", "worst_complete_scenario_v1" if controller.uses_daily_grid2_demand else None),
+            ("grid2_demand_window_step_minutes", 15 if args.rate_structure == WINTER_TOU_DEMAND_CPP else None),
             ("doe_grid_limit_kw", DOE_GRID_LIMIT_KW if doe_selected else None),
             ("doe_panel_limit_kw", DOE_PANEL_LIMIT_KW if doe_selected else None),
             ("doe_grid_penalty_weight", DOE_GRID_PENALTY_USD_PER_KWH if doe_selected else None),
@@ -699,7 +703,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ev_provider = ScenarioEVForecast(ev.vehicle_id, ev_control)
     if controller.uses_daily_grid2_demand:
-        peak_formula = "(0.25/N)*sum_weekdays[(2.34/21)*daily_on_peak_max_30min_kw + (4.47/21)*daily_anytime_max_30min_kw]; each maximum spans paired water/EV scenarios and includes observed earlier-today peaks"
+        peak_formula = "max_s (0.25/N)*sum_weekdays[(2.34/21)*daily_on_peak_max_30min_kw[s] + (4.47/21)*daily_anytime_max_30min_kw[s]]; each peak stays within a paired water/EV scenario and includes observed earlier-today peaks; rolling 30-minute windows every 15 minutes, fully inside the weekday and eligible on-peak period"
     elif effective_peak_weight == 0:
         peak_formula = "zero"
     else:
@@ -762,6 +766,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "peak_limit_kw": args.peak_limit_kw,
         "peak_formula": peak_formula,
+        "grid2_demand_aggregation": ("worst_complete_scenario_v1" if controller.uses_daily_grid2_demand else None),
+        "grid2_demand_window_step_minutes": (15 if args.rate_structure == WINTER_TOU_DEMAND_CPP else None),
         "grid2_demand_formulation": (controller.grid2_demand_formulation
                                      if args.rate_structure == WINTER_TOU_DEMAND_CPP else None),
         "grid2_on_peak_demand_usd_per_kw_day": (rate_selection.schedule.on_peak_demand_charge_usd_per_kw_day

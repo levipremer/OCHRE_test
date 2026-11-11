@@ -837,6 +837,7 @@ class SingleHomeHEMSSimulation:
                     project_ev_only_hub_observation(
                         previous_status, ev_only_hub_controller.equipment_name,
                         include_total_home=ev_only_hub_controller.include_total_home_meter,
+                        include_circuits=ev_only_hub_controller.include_circuit_meters,
                     )
                     if ev_only_hub_controller is not None and apply_controls
                     else previous_status

@@ -693,7 +693,8 @@ class DynamicHVAC(HVAC):
             rated_efficiency = kwargs.get('Rated Efficiency', '(Unknown Efficiency)')
             multispeed_file = kwargs.get('multispeed_file', 'HVAC Multispeed Parameters.csv')
             df_speed = load_csv(multispeed_file)
-            speed_params = df_speed.loc[(df_speed['HVAC Name'] == self.name) & 
+            performance_name = getattr(self, 'performance_name', self.name)
+            speed_params = df_speed.loc[(df_speed['HVAC Name'] == performance_name) &
                                         (df_speed['HVAC Efficiency'] == rated_efficiency) &
                                         (df_speed['Number of Speeds'] == self.n_speeds)]
             if not len(speed_params):
@@ -720,7 +721,8 @@ class DynamicHVAC(HVAC):
                                                                                                 SPEED_TYPES))
         speed_type = SPEED_TYPES[self.n_speeds]
 
-        biquadratic_file = kwargs.get('biquadratic_file', f'Biquadratic {self.name}.csv')
+        performance_name = getattr(self, 'performance_name', self.name)
+        biquadratic_file = kwargs.get('biquadratic_file', f'Biquadratic {performance_name}.csv')
         biquad_params = self.initialize_parameters(biquadratic_file, value_col=None, **kwargs)
         biquad_params = biquad_params.loc[:, [col for col in biquad_params if speed_type == col.split('_')[0]]]
         if len(biquad_params.columns) != self.n_speeds:
@@ -1972,6 +1974,98 @@ class ASHPHeater(HeatPumpHeater):
         # the ER staging configuration.
         if hasattr(self, 'er_stage_idx'):
             self.reset_er_stages()
+
+
+class DualFuelASHPHeater(ASHPHeater):
+    """Air-source heat pump with natural-gas furnace backup.
+
+    The inherited ``er_*`` state is intentionally reused only for backup
+    dispatch. Furnace sizing and fuel accounting remain independent from all
+    electric-resistance capacity and staging overrides.
+    """
+
+    name = 'Dual Fuel ASHP Heater'
+    performance_name = 'ASHP Heater'
+    is_gas = True
+
+    def __init__(self, **kwargs):
+        resstock_capacity = kwargs.get('ResStock Backup Heating Capacity (W)')
+        furnace_capacity = kwargs.get('Furnace Backup Capacity (W)', resstock_capacity)
+        if furnace_capacity is None:
+            raise OCHREException(
+                'Dual Fuel ASHP Heater requires Furnace Backup Capacity (W) '
+                'or ResStock Backup Heating Capacity (W).'
+            )
+        if furnace_capacity <= 0:
+            raise OCHREException('Furnace Backup Capacity (W) must be greater than zero.')
+
+        furnace_afue = kwargs.get('Furnace Backup AFUE (-)')
+        if furnace_afue is None or not 0 < furnace_afue <= 1:
+            raise OCHREException('Furnace Backup AFUE (-) must be in (0, 1].')
+
+        # ASHPHeater owns the shared backup controller. Feed it only the
+        # furnace-specific values and remove ER stage inputs so panel-related
+        # overrides cannot resize the gas furnace.
+        dual_fuel_kwargs = dict(kwargs)
+        dual_fuel_kwargs['Backup Capacity (W)'] = furnace_capacity
+        dual_fuel_kwargs['Backup EIR (-)'] = 1 / furnace_afue
+        dual_fuel_kwargs.pop('Number of Backup Stages (-)', None)
+        dual_fuel_kwargs.pop('Backup Stage Capacities (W)', None)
+
+        super().__init__(**dual_fuel_kwargs)
+        self.resstock_backup_capacity = resstock_capacity
+        self.furnace_capacity_rated = furnace_capacity
+        self.furnace_afue = furnace_afue
+
+    def configure_er_stages(
+        self,
+        capacity,
+        number_of_stages=None,
+        stage_capacities=None,
+        force_staging=False,
+    ):
+        """Use one exact-capacity furnace stage without ER element rounding."""
+        return [0, capacity]
+
+    def calculate_power_and_heat(self):
+        super().calculate_power_and_heat()
+
+        scale = self.space_fraction
+        furnace_input_kw = self.er_capacity * self.er_eir_rated * scale / 1000
+        if self.defrost_model == 'Discrete' and self.defrost_active_fraction > 0:
+            hp_input_kw = self.hp_power * scale / 1000
+        else:
+            total_main_input_kw = abs(self.capacity) * self.eir * scale / 1000
+            hp_input_kw = max(total_main_input_kw - furnace_input_kw, 0)
+
+        # The compressor and shared blower are electric; only the furnace
+        # burner input is gas.
+        self.electric_kw = hp_input_kw + self.fan_power / 1000
+        self.gas_therms_per_hour = furnace_input_kw * kwh_to_therms
+
+    def generate_results(self):
+        results = super().generate_results()
+
+        if self.verbosity >= 7:
+            replacements = {
+                'ER Power (kW)': 'Furnace Input (kW)',
+                'ER Stage (-)': 'Furnace Stage (-)',
+                'ER Number of Stages (-)': 'Furnace Number of Stages (-)',
+                'ER Capacity (W)': 'Furnace Capacity (W)',
+                'ER Rated Capacity (W)': 'Furnace Rated Capacity (W)',
+                'ER Staged Control Active (-)': 'Furnace Staged Control Active (-)',
+                'ER Stage Timer (minutes)': 'Furnace Stage Timer (minutes)',
+                'Defrost ER Strategy': 'Defrost Furnace Strategy',
+                'Defrost ER Commanded Stage (-)': 'Defrost Furnace Commanded Stage (-)',
+                'Defrost ER Capacity (W)': 'Defrost Furnace Capacity (W)',
+            }
+            for old_suffix, new_suffix in replacements.items():
+                old_name = f'{self.end_use} {old_suffix}'
+                if old_name in results:
+                    results[f'{self.end_use} {new_suffix}'] = results.pop(old_name)
+            results[f'{self.end_use} Mode'] = self.mode.replace('ER', 'Furnace')
+
+        return results
 
 
 class MinisplitAHSPHeater(MinisplitHVAC, ASHPHeater):

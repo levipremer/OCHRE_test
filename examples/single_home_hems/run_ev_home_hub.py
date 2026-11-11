@@ -51,6 +51,7 @@ from examples.single_home_hems.single_home_hems.controllers.ev_home_hub import (
     EVHomeHubController,
 )
 from examples.single_home_hems.single_home_hems.eligible_hub_rf import EligibleHubRFProvider
+from examples.single_home_hems.single_home_hems.submeter_hub_rf import SubmeterHubRFProvider
 from examples.single_home_hems.single_home_hems.ev_hub_issued import IssuedEVHubForecasts
 from examples.single_home_hems.single_home_hems.ev_scenarios import ScenarioEVForecast
 from examples.single_home_hems.single_home_hems.ev_study_forecasts import (
@@ -92,6 +93,8 @@ WARMUP = pd.Timedelta(hours=16)
 DEFAULT_SOURCE_START = pd.Timestamp("2026-09-22 03:00")
 CONTROL_STEP = pd.Timedelta(minutes=15)
 DEFAULT_ELIGIBLE_RF_MODEL = (EXAMPLE_ROOT / "inputs/predictive/models/eligible_hub_rf.joblib")
+DEFAULT_SUBMETER_RF_MODEL = (EXAMPLE_ROOT / "inputs/predictive/models/submeter_hub_rf.joblib")
+HUB_CIRCUIT_SEED_COLUMNS = ("water_heater_kw", "outdoor_heat_pump_kw", "indoor_fan_kw")
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -102,7 +105,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
                         help="Naive local DC House interval start matching simulation start")
     parser.add_argument("--duration-hours", type=float, default=1.0)
     parser.add_argument("--horizon-hours", type=int, choices=(8, 20), default=8,
-                        help="Rolling EV prediction horizon; 20 hours opts into the approved causal forecast tail")
+                        help="Rolling EV prediction horizon; default Hub RF predicts all 20 hours directly")
     parser.add_argument("--mobility-source-window-hours", type=float,
                         help="Select Audi mobility using this evaluation window, including for a short matched pilot")
     parser.add_argument("--rate-selection-duration-hours", type=float,
@@ -110,12 +113,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--native-warmup-hours", type=int, choices=(16, 24), default=16,
                         help="Measured native plant warm-up; 24 hours matches rolling-start HPWH comparisons")
     parser.add_argument("--hub-issued-forecast-csv", type=Path,
-                        help="Pre-issued 15-minute Home Hub predictions on the simulation clock; required to run")
-    parser.add_argument("--hub-forecast-mode", choices=("issued_csv", "corrected_rf", "perfect"),
-                        default="issued_csv")
-    parser.add_argument("--hub-rf-artifact", type=Path, default=DEFAULT_ELIGIBLE_RF_MODEL)
+                        help="Pre-issued predictions on the simulation clock for issued_csv mode")
+    parser.add_argument("--hub-forecast-mode", choices=("submeter_rf", "issued_csv", "corrected_rf", "perfect"),
+                        default="submeter_rf",
+                        help="Default: four-week unweighted RF, leaf 15, with three circuit power histories")
+    parser.add_argument("--hub-rf-artifact", type=Path,
+                        help="Defaults to the circuit-history model for submeter_rf or legacy aggregate model for corrected_rf")
     parser.add_argument("--hub-seed-csv", type=Path,
-                        help="Matched native pretest 15-minute non-EV Hub history for RF lags")
+                        help="Matched pretest 15-minute non-EV Hub history; submeter_rf also requires water_heater_kw, outdoor_heat_pump_kw and indoor_fan_kw")
     parser.add_argument("--outside-rf-inference-gap-policy",
                         choices=("strict", "causal_short_gap"), default="causal_short_gap")
     parser.add_argument("--outside-forecast-mode", choices=(
@@ -166,12 +171,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 def _validated_args(argv: list[str] | None) -> argparse.Namespace:
     args = build_argument_parser().parse_args(argv)
+    if args.hub_rf_artifact is None:
+        args.hub_rf_artifact = (DEFAULT_SUBMETER_RF_MODEL
+                                if args.hub_forecast_mode == "submeter_rf"
+                                else DEFAULT_ELIGIBLE_RF_MODEL)
     if args.time_limit_seconds is None:
         args.time_limit_seconds = 180.0 if args.horizon_hours == 20 else 600.0
     if not args.validate_only and args.hub_forecast_mode == "issued_csv" and args.hub_issued_forecast_csv is None:
         raise ValueError("--hub-issued-forecast-csv is required for issued-CSV EV-only simulation")
-    if not args.validate_only and args.hub_forecast_mode == "corrected_rf" and args.hub_seed_csv is None:
-        raise ValueError("--hub-seed-csv is required for corrected-RF EV-only simulation")
+    if (not args.validate_only and args.hub_forecast_mode in {"corrected_rf", "submeter_rf"}
+            and args.hub_seed_csv is None):
+        raise ValueError(f"--hub-seed-csv is required for {args.hub_forecast_mode} EV-only simulation")
     if "perfect" in (args.hub_forecast_mode, args.outside_forecast_mode) and args.perfect_load_truth_csv is None:
         raise ValueError("--perfect-load-truth-csv is required for perfect load forecasts")
     if args.one_shot and (args.hub_forecast_mode, args.outside_forecast_mode, args.mobility_forecast_mode) != (
@@ -261,10 +271,11 @@ def _peak_objective_metadata(controller: EVHomeHubController, schedule) -> dict:
         "or historical peak floor"
     )
     daily_peak = (
-        "(0.25/N)*sum_weekdays[(2.34/21)*daily_on_peak_max_30min_kw + "
-        "(4.47/21)*daily_anytime_max_30min_kw]; each maximum spans mobility "
-        "scenarios and includes observed earlier-today peaks; N is the full "
-        "horizon control-interval count"
+        "max_s (0.25/N)*sum_weekdays[(2.34/21)*daily_on_peak_max_30min_kw[s] + "
+        "(4.47/21)*daily_anytime_max_30min_kw[s]]; each peak is within one mobility "
+        "scenario and includes observed earlier-today peaks; N is the full "
+        "horizon control-interval count; rolling 30-minute windows every 15 minutes, "
+        "fully within the local weekday and eligible on-peak period"
     )
     formula = {
         "tou-winter": "No generic peak objective",
@@ -288,7 +299,7 @@ def _peak_objective_metadata(controller: EVHomeHubController, schedule) -> dict:
             "normalization_steps": steps,
             "dt_over_n": step_hours / steps,
             "billing_days": "weekdays_only",
-            "aggregation": "sum of daily, separately cross-scenario maximum on-peak and anytime components",
+            "aggregation": "worst_complete_scenario_v1",
             "already_observed_peaks": "included as floors for the current weekday",
         }
     elif controller.rate_structure == WINTER_TOU_DEMAND_CPP:
@@ -310,6 +321,17 @@ def _read_non_ev_hub_seed(path: Path) -> pd.Series:
     if "hub_non_ev_power_kw" not in seed:
         raise ValueError("RF seed must contain hub_non_ev_power_kw")
     return seed["hub_non_ev_power_kw"].astype(float)
+
+
+def _read_hub_circuit_seed(path: Path) -> pd.DataFrame:
+    seed = pd.read_csv(path, parse_dates=["timestamp"]).set_index("timestamp")
+    missing = set(HUB_CIRCUIT_SEED_COLUMNS) - set(seed)
+    if missing:
+        raise ValueError(
+            f"Circuit-history RF seed lacks {sorted(missing)}; prepare a matched seed "
+            "with prepare_ev_submeter_hub_seed.py from completed native OCHRE results"
+        )
+    return seed.loc[:, list(HUB_CIRCUIT_SEED_COLUMNS)].astype(float)
 
 
 def _observed_ambient_15min(
@@ -479,9 +501,8 @@ def main(argv: list[str] | None = None) -> int:
     if not split.index.equals(expected):
         raise ValueError("Mapped Hub split does not cover every warm-up/evaluation minute")
     if args.horizon_hours == 20:
-        # The forecast's final 12 hours use a completed earlier local clock
-        # day. This checks the warm-up source without handing any future split
-        # values to the live Home Hub or Outside-Hub RF providers.
+        # Outside-Hub (and explicit legacy aggregate Hub) forecasts still use
+        # a prior-day tail. The default submeter Hub RF predicts all 80 leads.
         prior_complete_local_day(
             split.loc[:, ["hub_other_power_kw", "outside_hub_power_kw"]],
             pd.Timestamp(config.start_time),
@@ -489,6 +510,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.hub_forecast_mode == "perfect":
         hub_provider = PerfectHomeHubForecast(truth)
         hub_provider.issue(pd.Timestamp(config.start_time), pd.DataFrame(), horizon, ev.hems.max_discharge_kw)
+        hub_provider.history.clear()
+    elif args.hub_forecast_mode == "submeter_rf" and args.hub_seed_csv is not None:
+        hub_provider = SubmeterHubRFProvider.from_artifact(
+            args.hub_rf_artifact,
+            seed_history=_read_non_ev_hub_seed(args.hub_seed_csv),
+            seed_circuit_history=_read_hub_circuit_seed(args.hub_seed_csv),
+            ambient_history=_observed_ambient_15min(
+                Path(config.weather_file), pd.Timestamp(config.start_time).tz,
+                pd.Timestamp(config.start_time), pd.Timestamp(config.start_time) + duration,
+            ),
+            ev_name=f"EV_{ev.vehicle_id}",
+        )
+        hub_provider.issue(pd.Timestamp(config.start_time), pd.DataFrame(),
+                           horizon, ev.hems.max_discharge_kw)
         hub_provider.history.clear()
     elif args.hub_forecast_mode == "corrected_rf" and args.hub_seed_csv is not None:
         hub_provider = EligibleHubRFProvider.from_artifact(
@@ -672,23 +707,27 @@ def main(argv: list[str] | None = None) -> int:
             "peak_limit_kw": ev_controller.peak_limit_kw,
             **_peak_objective_metadata(ev_controller, rate_selection.schedule),
             "peak_weight_usd_per_kw": ev_controller.peak_weight_usd_per_kw,
+            "grid2_demand_aggregation": ("worst_complete_scenario_v1" if ev_controller.uses_daily_grid2_demand else None),
+            "grid2_demand_window_step_minutes": (15 if args.rate_structure == WINTER_TOU_DEMAND_CPP else None),
             "grid2_demand_formulation": ev_controller.grid2_demand_formulation,
             "solver_relative_gap": ev.hems.mip_relative_gap,
             "solver_time_limit_seconds": ev.hems.solver_time_limit_seconds,
             "ev_variant": "existing milp_health weights/dynamics; horizon recorded explicitly",
             "hub_observability_variant": (
+                "EV plus water-heater, outdoor heat-pump and indoor-fan power submeters; corrected Hub aggregate"
+                + (" and total-home aggregate" if ev_controller.include_total_home_meter else "")
+                if ev_controller.include_circuit_meters else
                 "EV submeter plus corrected Hub and total-home aggregate meters"
                 if ev_controller.include_total_home_meter else "only EV submetered"
             ),
             "hub_meter_column": HUB_POWER_KEY,
             "controller_observation_columns": list(observation_keys(
                 ev_name, include_total_home=ev_controller.include_total_home_meter,
+                include_circuits=ev_controller.include_circuit_meters,
             )),
             "hub_meter_definition": (
-                "HVAC heating main + HVAC heating fan + HVAC cooling standby + "
+                "HVAC heating main + HVAC heating fan + HVAC cooling electric + "
                 "water heating + Hub-other + signed EV AC power; excludes HVAC resistance"
-                if ev_controller.include_total_home_meter
-                else "HVAC heating + HVAC cooling + water heating + Hub-other + signed EV AC power"
             ),
             "ev_discharge_eligible_loads": list(HOME_HUB_BACKED_LOADS),
             "ev_discharge_control": "fixed discharge mode; actual OCHRE minute power clipped to eligible Hub load",
@@ -708,12 +747,14 @@ def main(argv: list[str] | None = None) -> int:
                 if args.hub_seed_csv is not None else None
             ),
             "hub_seed_rule": (
+                "Matched native pretest non-EV Hub and three circuit power histories with HVAC ER removed"
+                if isinstance(hub_provider, SubmeterHubRFProvider) else
                 "Matched native pretest non-EV Hub aggregate with HVAC ER removed"
                 if isinstance(hub_provider, EligibleHubRFProvider)
                 and hub_provider.metadata.get("hub_target", "").endswith("excluding HVAC resistance")
                 else "Matched native pretest non-EV Hub aggregate"
             ),
-            "hub_rf_metadata": (hub_provider.metadata if isinstance(hub_provider, EligibleHubRFProvider)
+            "hub_rf_metadata": (hub_provider.metadata if isinstance(hub_provider, (EligibleHubRFProvider, SubmeterHubRFProvider))
                                 else None),
             "hub_forecast_issuance_count_required": issuance_count,
             "outside_forecast_method": outside.method_label,

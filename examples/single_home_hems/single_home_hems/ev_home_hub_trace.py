@@ -87,6 +87,8 @@ def objective_component_frames(
             )
         demand_parts = plan.get("daily_demand_objective_terms", {}) if plan is not None else {}
         row["grid2_demand_formulation"] = plan.get("grid2_demand_formulation") if plan is not None else None
+        row["daily_demand_aggregation"] = plan.get("daily_demand_aggregation") if plan is not None else None
+        row["daily_demand_worst_scenario_index"] = plan.get("daily_demand_worst_scenario_index") if plan is not None else None
         row["daily_demand_dt_over_n"] = plan.get("daily_demand_scale", np.nan) if plan is not None else np.nan
         for name in ("on_peak", "anytime"):
             row[f"daily_demand_{name}_objective_cost"] = (
@@ -114,6 +116,8 @@ def objective_component_frames(
                 "scenario_id": path.get("candidate_id", str(index)),
                 "scenario_probability": 1 / count,
                 "aggregation_note": (
+                    "mean except comfort=max; modeled_home_peak=max of complete per-scenario demand costs across both components and all days"
+                    if plan.get("daily_demand_aggregation") == "worst_complete_scenario_v1" else
                     "mean except comfort=max; modeled_home_peak is dt/N times the sum of weekday daily on-peak and anytime maxima, each separately cross-scenario"
                     if plan.get("grid2_demand_formulation") == "weekday_daily_dt_over_n_v1"
                     and bool(plan.get("daily_demand_objective_terms")) else
@@ -125,6 +129,8 @@ def objective_component_frames(
                     float(path_terms[name]) if name in path_terms else
                     0.0 if name == "trip_shortfall" else np.nan
                 )
+            if plan.get("daily_demand_cost_scenarios") is not None:
+                entry["modeled_home_peak_path_cost"] = plan["daily_demand_cost_scenarios"][index]
             requested = np.asarray(path.get(
                 "requested_trip_energy_kwh", path.get("trip_energy_kwh", []),
             ), dtype=float)

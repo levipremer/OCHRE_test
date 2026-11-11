@@ -10,6 +10,10 @@ Run the commands below **from the repository root**. This example uses the local
 OCHRE source and the shared inputs in `examples/five_home_block`; keep the full
 repository checkout together.
 
+To select HVAC-only, water-heater-only, joint thermal, whole-home joint, or
+bidirectional charger-only control from one JSON file, see the
+[central controller suite guide](../../docs/central_experiments.md#controller-suite-quickstart).
+
 ## Install
 
 Python 3.12 is suitable for this example. The repository declares Python

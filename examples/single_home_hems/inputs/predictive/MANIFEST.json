@@ -124,6 +124,18 @@
       "sha256": "9941335e7261643ff2c9f4727da0b70832612e8692148204bd1ed2293a8d69c3"
     },
     {
+      "path": "examples/single_home_hems/inputs/predictive/models/submeter_hub_rf.joblib",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/ev_submeter_rf_4wk_20h_no_er/models.joblib",
+      "bytes": 37847647,
+      "sha256": "1585d1f370a2d336d753a807f606248310070e297a55a9f59da939b8e09efe23"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/models/submeter_hub_rf_metadata.json",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/ev_submeter_rf_4wk_20h_no_er/metadata.json",
+      "bytes": 8620,
+      "sha256": "378cf235364775b28507ce7bea5b84a356d734901d078d08a678468d09fdf0c4"
+    },
+    {
       "path": "examples/single_home_hems/inputs/predictive/seeds/home_hub_meter_15min.csv",
       "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/native_pretest_oikolab_nov03_rest_sep06/data/home_hub_meter_15min.csv",
       "bytes": 228691,
@@ -134,6 +146,12 @@
       "source_path_before_packaging": null,
       "bytes": 1525131,
       "sha256": "5afac12c1bdaa5de408b923e2a3c1b12529628f506bc928f4adc8d2a1989f712"
+    },
+    {
+      "path": "examples/single_home_hems/inputs/predictive/seeds/submeter_hub_seed_nov30_2025.csv",
+      "source_path_before_packaging": "examples/single_home_hems/outputs/home_01/ev_submeter_seed_nov30_2025.csv",
+      "bytes": 48905,
+      "sha256": "036ea335487051230eb70e8b661212257cc2f6d92123c824bfef446dd6f462f9"
     },
     {
       "path": "examples/single_home_hems/inputs/predictive/weather/gfs_00z_forecasts.parquet",

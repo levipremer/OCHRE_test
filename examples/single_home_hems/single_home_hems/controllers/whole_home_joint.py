@@ -24,6 +24,10 @@ import pandas as pd
 from examples.five_home_block.five_home_block.ev_degradation import turning_points
 
 from ..control_forecasts import EVScenarioSet
+from ..demand_objective import scenario_demand_objective, demand_cost_metadata
+from ..demand_windows import (
+    completed_demand_windows, demand_window_is_weekday, demand_window_is_on_peak,
+)
 from ..ev_home_hub_trace import predicted_trip_energy_fields
 from ..forecast import Forecast
 from ..rates import (
@@ -462,7 +466,7 @@ class WholeHomeJointPredictiveController:
         return timestamp if timestamp.tz is None else timestamp.tz_convert(LOCAL_TIMEZONE)
 
     def _observed_daily_demand_peaks(self, timestamp):
-        """Causal complete-block import maxima for the current local weekday."""
+        """Causal rolling-window import maxima for the current local weekday."""
         timestamp = pd.Timestamp(timestamp)
         day = self._demand_local_time(timestamp).normalize()
         if day.weekday() >= 5:
@@ -476,45 +480,43 @@ class WholeHomeJointPredictiveController:
                         raise ValueError("Restored daily demand peaks must be finite and nonnegative")
                     peaks[key] = max(peaks[key], value)
         first = getattr(self.ev_controller, "first_observation", None)
-        by_block = {}
-        for start, value in self._daily_demand_meter_kw:
-            if (start + pd.Timedelta(minutes=1) > timestamp
-                    or self._demand_local_time(start).normalize() != day
-                    or (first is not None and start < first)):
-                continue
-            by_block.setdefault(start.floor("30min"), []).append((start, value))
-        for block_start, readings in by_block.items():
-            expected = pd.date_range(block_start, periods=30, freq="min")
-            if [start for start, _ in readings] != list(expected):
-                continue
-            mean_import = max(0.0, float(np.mean([value for _, value in readings])))
+        readings = [
+            (start, value) for start, value in self._daily_demand_meter_kw
+            if start + pd.Timedelta(minutes=1) <= timestamp
+            and self._demand_local_time(start).normalize() == day
+            and (first is None or start >= first)
+        ]
+        power = pd.Series([v for _, v in readings],
+                          index=pd.DatetimeIndex([t for t, _ in readings]), dtype=float)
+        for block_start, mean in completed_demand_windows(power).items():
+            mean_import = max(0.0, float(mean))
             peaks["anytime_kw"] = max(peaks["anytime_kw"], mean_import)
-            if WinterTOURate.is_on_peak(block_start):
+            if demand_window_is_on_peak(block_start):
                 peaks["on_peak_kw"] = max(peaks["on_peak_kw"], mean_import)
         return {day.isoformat(): peaks}
 
     def _build_daily_grid2_demand(self, combined, timestamp, steps, observed_first_half_kw):
-        """One epigraph per weekday/component over every existing paired path."""
+        """Worst complete demand cost over the existing paired scenario paths."""
         interval = self.hvac_controller.model_timestep
         starts = pd.date_range(timestamp, periods=steps, freq=interval)
         blocks, block_starts = [], []
         active = np.zeros(steps, dtype=bool)
         self._peak_observed_first_half_kw = None
-        if starts[0].minute % 30 == 15 and self._demand_local_time(starts[0]).weekday() < 5:
+        if demand_window_is_weekday(starts[0] - interval):
             if observed_first_half_kw is None or not np.isfinite(observed_first_half_kw):
-                raise ValueError("A weekday mid-block issue needs its observed first-half power")
+                raise ValueError("A rolling-demand issue needs its observed first-half power")
             self._peak_observed_first_half_kw = float(observed_first_half_kw)
             blocks.append((combined[:, 0] + observed_first_half_kw) / 2)
             block_starts.append(starts[0] - interval)
             active[0] = True
         for step, start in enumerate(starts[:-1]):
-            if start.minute % 30 == 0 and self._demand_local_time(start).weekday() < 5:
+            if demand_window_is_weekday(start):
                 blocks.append((combined[:, step] + combined[:, step + 1]) / 2)
                 block_starts.append(start)
                 active[step:step + 2] = True
         block_starts = tuple(block_starts)
         block_power = cp.vstack(blocks).T if blocks else None
-        on_peak = np.array([WinterTOURate.is_on_peak(t) for t in block_starts], dtype=bool)
+        on_peak = np.array([demand_window_is_on_peak(t) for t in block_starts], dtype=bool)
         days = tuple(dict.fromkeys(self._demand_local_time(t).normalize() for t in starts
                                   if self._demand_local_time(t).weekday() < 5))
         observed = self._observed_daily_demand_peaks(timestamp)
@@ -522,28 +524,17 @@ class WholeHomeJointPredictiveController:
         observed_any = np.array([observed.get(day.isoformat(), {}).get("anytime_kw", 0.0) for day in days])
         scale = interval.total_seconds() / 3600 / steps
         constraints = []
-        if days:
-            on = cp.Variable(len(days), nonneg=True, name="joint_daily_on_peak_demand_kw")
-            anytime = cp.Variable(len(days), nonneg=True, name="joint_daily_anytime_demand_kw")
-            constraints += [on >= observed_on, anytime >= observed_any]
-            for index, day in enumerate(days):
-                day_blocks = np.array([self._demand_local_time(t).normalize() == day
-                                       for t in block_starts], dtype=bool)
-                if day_blocks.any():
-                    constraints.append(anytime[index] >= block_power[:, day_blocks])
-                if (day_blocks & on_peak).any():
-                    constraints.append(on[index] >= block_power[:, day_blocks & on_peak])
-            costs = {
-                "on_peak": scale * GRID2_ON_PEAK_DEMAND_USD_PER_KW_DAY * cp.sum(on),
-                "anytime": scale * GRID2_ANYTIME_DEMAND_USD_PER_KW_DAY * cp.sum(anytime),
-            }
-        else:
-            on, anytime = None, None
-            costs = {key: cp.Constant(0.0) for key in ("on_peak", "anytime")}
+        day_masks = [np.array([self._demand_local_time(t).normalize() == day
+                               for t in block_starts], dtype=bool) for day in days]
+        demand = scenario_demand_objective(
+            block_power, day_masks, on_peak, observed_on, observed_any,
+            combined.shape[0], scale)
+        costs = demand["daily_demand_objective_terms"]
         self._daily_demand_objective_terms = costs
         self._daily_demand_plan = {
+            "daily_demand_window_minutes": 30, "daily_demand_window_step_minutes": 15,
             "daily_demand_days": days,
-            "daily_on_peak_demand_kw": on, "daily_anytime_demand_kw": anytime,
+            **{key: value for key, value in demand.items() if key != "daily_demand_objective_terms"},
             "daily_demand_observed_on_peak_kw": observed_on,
             "daily_demand_observed_anytime_kw": observed_any,
             "daily_demand_observed_peaks": observed,
@@ -559,7 +550,7 @@ class WholeHomeJointPredictiveController:
             "daily_demand_active": active,
         }
         self._peak_demand_block_starts = tuple(t for t, selected in zip(block_starts, on_peak) if selected)
-        peak_active = np.array([t.floor("30min") in self._peak_demand_block_starts for t in starts])
+        peak_active = np.array([t in self._peak_demand_block_starts or t - interval in self._peak_demand_block_starts for t in starts])
         return constraints, peak_active
 
     def daily_demand_metadata(self, *, solved=False):
@@ -571,14 +562,11 @@ class WholeHomeJointPredictiveController:
             if isinstance(value, cp.Expression):
                 value = value.value if solved else None
             result[key] = _trace_json_value(value)
-        result["daily_demand_objective_terms"] = {
-            key: float(value.value) if solved else None
-            for key, value in self._daily_demand_objective_terms.items()
-        }
+        result.update(demand_cost_metadata(self._daily_demand_plan, solved=solved))
         return result
 
     def _observed_first_half_kw(self, issue_time: pd.Timestamp) -> float:
-        """Mean the fifteen complete meter minutes preceding a mid-block issue."""
+        """Mean the fifteen complete meter minutes preceding the issue."""
         expected = pd.date_range(
             pd.Timestamp(issue_time) - pd.Timedelta(minutes=15),
             periods=15, freq="min",
@@ -587,7 +575,7 @@ class WholeHomeJointPredictiveController:
         if len(observed) != 15 or any(actual != target for (actual, _), target in zip(observed, expected)):
             raise ValueError(
                 "Winter demand control needs 15 consecutive observed whole-home meter "
-                "minutes before an on-peak :15 or :45 decision"
+                "minutes before a demand decision"
             )
         return float(np.mean([power_kw for _, power_kw in observed]))
 
@@ -1370,10 +1358,11 @@ class WholeHomeJointPredictiveController:
         observed_first_half_kw = None
         if (self.peak_window == WINTER_TOU_PEAK_WINDOW
                 and self.peak_weight_usd_per_kw > 0
+                and not self.uses_daily_grid2_demand
                 and timestamp.minute % 30 == 15
                 and WinterTOURate.is_on_peak(timestamp - pd.Timedelta(minutes=15))) or (
-                    self.uses_daily_grid2_demand and timestamp.minute % 30 == 15
-                    and self._demand_local_time(timestamp).weekday() < 5):
+                    self.uses_daily_grid2_demand
+                    and demand_window_is_weekday(timestamp - pd.Timedelta(minutes=15))):
             observed_first_half_kw = self._observed_first_half_kw(timestamp)
         problem = self.optimization_problem_milp(
             water, hvac, ev_problem, ev_plan,
@@ -1471,9 +1460,10 @@ class WholeHomeJointPredictiveController:
                 )
         daily_components = {}
         if self.uses_daily_grid2_demand:
+            selected_costs = self.daily_demand_metadata(solved=True)["daily_demand_objective_terms"]
             daily_components = {
-                "daily_demand_on_peak_component": float(self._daily_demand_objective_terms["on_peak"].value),
-                "daily_demand_anytime_component": float(self._daily_demand_objective_terms["anytime"].value),
+                "daily_demand_on_peak_component": selected_costs["on_peak"],
+                "daily_demand_anytime_component": selected_costs["anytime"],
                 "grid2_demand_formulation": self.grid2_demand_formulation,
                 "daily_demand_scale": self._daily_demand_plan["daily_demand_scale"],
                 "daily_demand_metadata_json": json.dumps(self.daily_demand_metadata(solved=True), allow_nan=False),

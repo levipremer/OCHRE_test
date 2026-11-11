@@ -19,9 +19,27 @@ import pandas as pd
 
 from .runtime_threads import apply_rf_threads
 
-from examples.single_home_hems.forecasting.evaluate_outside_hub import SIMULATION_START
-from examples.single_home_hems.forecasting.evaluate_simulated_home_hub import HORIZON_STEPS, WEEK
-from examples.single_home_hems.forecasting.outside_hub_er_multires_load import load_feature_matrix
+from examples.single_home_hems.forecasting.evaluate_outside_hub import (
+    SIMULATION_START, supervised_rows,
+)
+from examples.single_home_hems.forecasting.evaluate_outside_hub_with_er import (
+    load_composite_target,
+)
+from examples.single_home_hems.forecasting.evaluate_outside_hub_er_multires_rf import (
+    OLD_LAGS, WEATHER_MINUTE,
+)
+from examples.single_home_hems.forecasting.evaluate_simulated_home_hub import (
+    HORIZON_STEPS, WEEK,
+)
+from examples.single_home_hems.forecasting.outside_hub_candidate_models import (
+    make_candidate,
+)
+from examples.single_home_hems.forecasting.outside_hub_er_multires_load import (
+    load_feature_matrix, load_minute_observed,
+)
+from examples.single_home_hems.forecasting.outside_hub_er_weather_features import (
+    weather_feature_matrices,
+)
 from .home_hub_observation import HUB_POWER_KEY, TOTAL_POWER_KEY
 from .prior_day_load_forecast import (
     EXTENDED_STEPS, RF_STEPS, clock_slot_forecast, prior_complete_local_day,
@@ -52,17 +70,6 @@ def _local_naive(index: pd.DatetimeIndex, timezone: Any) -> pd.DatetimeIndex:
 
 def fit_study_model(path: str | Path = DEFAULT_ARTIFACT) -> Path:
     """Save the study's selected four-week model with its checked feature schema."""
-    from examples.single_home_hems.forecasting.evaluate_outside_hub import supervised_rows
-    from examples.single_home_hems.forecasting.evaluate_outside_hub_with_er import load_composite_target
-    from examples.single_home_hems.forecasting.evaluate_outside_hub_er_multires_rf import (
-        HORIZON_STEPS, OLD_LAGS, WEATHER_MINUTE,
-    )
-    from examples.single_home_hems.forecasting.outside_hub_candidate_models import make_candidate
-    from examples.single_home_hems.forecasting.outside_hub_er_multires_load import (
-        load_feature_matrix, load_minute_observed,
-    )
-    from examples.single_home_hems.forecasting.outside_hub_er_weather_features import weather_feature_matrices
-
     path = Path(path).expanduser().resolve()
     study = json.loads(STUDY_METADATA.read_text(encoding="utf-8"))
     chosen = study["selected_validation_params"][f"4w:{METHOD}"]
@@ -122,7 +129,7 @@ def fit_study_model(path: str | Path = DEFAULT_ARTIFACT) -> Path:
 
 
 def _read_pretest_seed(pretest_dir: Path, start: pd.Timestamp, timezone: Any) -> pd.Series:
-    """Read the checked pretest aggregate, retaining the legacy meter reader."""
+    """Read the preceding native replay as two aggregate meters, correcting ER wiring."""
     prepared = pretest_dir / "outside_hub_pretest_minute.csv"
     if prepared.is_file():
         frame = pd.read_csv(
@@ -132,27 +139,7 @@ def _read_pretest_seed(pretest_dir: Path, start: pd.Timestamp, timezone: Any) ->
         aggregate = frame.set_index("completed_at")["outside_hub_with_resistance_kw"]
         aggregate.index = pd.DatetimeIndex(aggregate.index, name="completed_at")
     else:
-        meter = pd.read_csv(
-            pretest_dir / "home_hub_meter_minute.csv",
-            usecols=["timestamp", "home_hub_power_kw"], parse_dates=["timestamp"],
-        ).set_index("timestamp")["home_hub_power_kw"]
-        total = pd.read_csv(
-            pretest_dir / "home_01_standardized.csv",
-            usecols=["timestamp", "total_electric_power_kw"], parse_dates=["timestamp"],
-        ).set_index("timestamp")["total_electric_power_kw"]
-        er = pd.read_csv(
-            pretest_dir / "raw/home_01.csv",
-            usecols=["Time", "HVAC Heating ER Power (kW)"], parse_dates=["Time"],
-        ).set_index("Time")["HVAC Heating ER Power (kW)"]
-        if not meter.index.equals(total.index):
-            raise ValueError("Pretest total-home and Home Hub meters are not aligned")
-        er = er.reindex(meter.index)
-        if er.isna().any():
-            raise ValueError("Pretest ER wiring correction lacks a minute")
-        corrected_hub = meter - er
-        aggregate = (total - corrected_hub).astype(float)
-        end_stamps = _local_naive(pd.DatetimeIndex(aggregate.index), timezone) + MINUTE
-        aggregate.index = pd.DatetimeIndex(end_stamps, name="completed_at")
+        aggregate = _read_raw_pretest_seed(pretest_dir, timezone)
     if aggregate.index.has_duplicates or not aggregate.index.is_monotonic_increasing:
         raise ValueError("Pretest aggregate timestamps are not unique and ordered")
     if not np.isfinite(aggregate.to_numpy()).all() or aggregate.lt(-1e-7).any():
@@ -162,6 +149,31 @@ def _read_pretest_seed(pretest_dir: Path, start: pd.Timestamp, timezone: Any) ->
     if len(seed) != 24 * 60 or seed.index[-1] != wall:
         raise ValueError("Pretest aggregate seed lacks the complete day before control")
     return seed
+
+
+def _read_raw_pretest_seed(pretest_dir: Path, timezone: Any) -> pd.Series:
+    meter = pd.read_csv(
+        pretest_dir / "home_hub_meter_minute.csv",
+        usecols=["timestamp", "home_hub_power_kw"], parse_dates=["timestamp"],
+    ).set_index("timestamp")["home_hub_power_kw"]
+    total = pd.read_csv(
+        pretest_dir / "home_01_standardized.csv",
+        usecols=["timestamp", "total_electric_power_kw"], parse_dates=["timestamp"],
+    ).set_index("timestamp")["total_electric_power_kw"]
+    er = pd.read_csv(
+        pretest_dir / "raw/home_01.csv",
+        usecols=["Time", "HVAC Heating ER Power (kW)"], parse_dates=["Time"],
+    ).set_index("Time")["HVAC Heating ER Power (kW)"]
+    if not meter.index.equals(total.index):
+        raise ValueError("Pretest total-home and Home Hub meters are not aligned")
+    er = er.reindex(meter.index)
+    if er.isna().any():
+        raise ValueError("Pretest ER wiring correction lacks a minute")
+    corrected_hub = meter - er
+    aggregate = (total - corrected_hub).astype(float)
+    end_stamps = _local_naive(pd.DatetimeIndex(aggregate.index), timezone) + MINUTE
+    aggregate.index = pd.DatetimeIndex(end_stamps, name="completed_at")
+    return aggregate
 
 
 def _read_runtime_weather(
