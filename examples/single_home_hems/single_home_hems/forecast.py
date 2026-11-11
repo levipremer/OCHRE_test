@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Protocol
 
 import pandas as pd
 
 if TYPE_CHECKING:
     from .water_forecast import ScenarioWaterForecast
+    from .rest_of_home_forecast import RestOfHomeHybridForecast
+    from .frozen_split_hub_forecast import FrozenSplitHubForecast
+    from .weather_forecast import ArchivedWeatherForecast
+    from .ev_hub_forecast import EVHubIntervalForecast
 
 
 PRICE_COLUMN = "electricity_price_usd_per_kwh"
@@ -42,10 +46,28 @@ class TimeOfUsePrice:
 
 @dataclass(frozen=True)
 class Forecast:
-    """Weather, schedules, prices, and an optional causal water forecast."""
+    """Weather, schedules, prices, and optional causal load forecasts."""
 
     data: pd.DataFrame
     water_scenarios: ScenarioWaterForecast | None = None
+    rest_of_home_forecast: RestOfHomeHybridForecast | None = None
+    hub_other_forecast: FrozenSplitHubForecast | None = None
+    outside_hub_forecast: FrozenSplitHubForecast | None = None
+    ev_schedules: dict = field(default_factory=dict)
+    backed_load_kw: pd.Series | None = None
+    ev_hub_intervals: EVHubIntervalForecast | None = None
+    weather_archive: ArchivedWeatherForecast | None = None
+    providers: dict = field(default_factory=dict)
+    tariff_price_at: Callable[[pd.Timestamp], float] | None = None
+    tariff_price_as_known_at: Callable[[pd.Timestamp, pd.Timestamp], float] | None = None
+    # Current EV boundary observations are separate from the preceding household
+    # status so enabling EV control does not change thermal cold-start behavior.
+    ev_states: dict = field(default_factory=dict)
+
+    def for_device(self, name, timestamp, horizon):
+        """Route an optional device provider while retaining shared context."""
+        provider = self.providers.get(name)
+        return self if provider is None else provider.at(timestamp, self, horizon)
 
     @classmethod
     def from_schedule(
@@ -54,6 +76,14 @@ class Forecast:
         price_at: Callable[[pd.Timestamp], float],
         *,
         water_scenarios: ScenarioWaterForecast | None = None,
+        rest_of_home_forecast: RestOfHomeHybridForecast | None = None,
+        hub_other_forecast: FrozenSplitHubForecast | None = None,
+        outside_hub_forecast: FrozenSplitHubForecast | None = None,
+        ev_schedules: dict | None = None,
+        backed_load_kw: pd.Series | None = None,
+        ev_hub_intervals: EVHubIntervalForecast | None = None,
+        weather_archive: ArchivedWeatherForecast | None = None,
+        price_as_known_at: Callable[[pd.Timestamp, pd.Timestamp], float] | None = None,
     ) -> "Forecast":
         """Build a forecast from the deterministic OCHRE input schedule."""
         if not isinstance(schedule.index, pd.DatetimeIndex):
@@ -66,7 +96,19 @@ class Forecast:
 
         data = schedule.copy()
         data[PRICE_COLUMN] = [price_at(pd.Timestamp(time)) for time in data.index]
-        return cls(data=data, water_scenarios=water_scenarios)
+        return cls(
+            data=data,
+            water_scenarios=water_scenarios,
+            rest_of_home_forecast=rest_of_home_forecast,
+            hub_other_forecast=hub_other_forecast,
+            outside_hub_forecast=outside_hub_forecast,
+            ev_schedules=ev_schedules or {},
+            backed_load_kw=backed_load_kw,
+            ev_hub_intervals=ev_hub_intervals,
+            weather_archive=weather_archive,
+            tariff_price_at=price_at,
+            tariff_price_as_known_at=price_as_known_at,
+        )
 
     def window(
         self,
@@ -78,7 +120,13 @@ class Forecast:
             raise ValueError("Prediction horizon must be positive")
         end = timestamp + horizon
         selected = (self.data.index >= timestamp) & (self.data.index < end)
-        return self.data.loc[selected].copy()
+        rows = self.data.loc[selected].copy()
+        if self.tariff_price_as_known_at is not None:
+            rows[PRICE_COLUMN] = [
+                self.tariff_price_as_known_at(timestamp, pd.Timestamp(target))
+                for target in rows.index
+            ]
+        return rows
 
     def price_at(self, timestamp: pd.Timestamp) -> float:
         """Return the forecast electricity price at one timestep."""

@@ -1,0 +1,4 @@
+results/
+smoke*_results/
+failed_import_results_*/
+*.log

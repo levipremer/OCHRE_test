@@ -128,6 +128,8 @@ def standardize_results(
     results: pd.DataFrame,
     home_id: str,
     numerical_tolerance_kw: float = 1e-6,
+    *, expected_ev_count: int | None = None,
+    resistance_outside_hub: bool = False,
 ) -> StandardizedResults:
     """Convert raw OCHRE results into stable fields used by this example."""
     if not isinstance(results.index, pd.DatetimeIndex):
@@ -138,6 +140,15 @@ def standardize_results(
     standardized = pd.DataFrame(index=results.index.copy())
     selected: dict[str, list[str]] = {}
     for field in SINGLE_COLUMN_CANDIDATES:
+        if field == "ev_power_kw" and expected_ev_count == 0:
+            if find_per_ev_columns(results.columns, "SOC (-)"):
+                raise OutputMappingError("EV results conflict with a home configured without EVs")
+            aggregate = _find_column(results.columns, SINGLE_COLUMN_CANDIDATES[field])
+            if aggregate is not None and results[aggregate].abs().max() > numerical_tolerance_kw:
+                raise OutputMappingError("Nonzero EV power in a home configured without EVs")
+            standardized[field] = 0.0
+            selected[field] = ["configured: no EV equipment"]
+            continue
         column = _required_column(results, field)
         standardized[field] = pd.to_numeric(results[column], errors="raise")
         selected[field] = [column]
@@ -169,7 +180,7 @@ def standardize_results(
         selected["ev_soc_fraction"] = [
             f"alias: {selected[per_ev_soc_fields[0]][0]}"
         ]
-    elif not per_ev_soc_fields:
+    elif not per_ev_soc_fields and expected_ev_count != 0:
         legacy_soc = _find_column(results.columns, LEGACY_EV_SOC_COLUMNS)
         if legacy_soc is None:
             raise OutputMappingError(
@@ -214,5 +225,87 @@ def standardize_results(
     selected["rest_of_home_power_kw"] = [
         "derived: total - HVAC - water heating - EV"
     ]
+    split_columns = {
+        "hub_other_power_kw": "DC House Hub Other Electric Power (kW)",
+        "outside_hub_power_kw": "DC House Outside Hub Electric Power (kW)",
+    }
+    present = {field: column for field, column in split_columns.items() if column in results}
+    if present and len(present) != len(split_columns):
+        raise OutputMappingError(
+            f"{home_id}: Home Hub replay must report both split loads; found {list(present)}"
+        )
+    if present:
+        for field, column in split_columns.items():
+            standardized[field] = pd.to_numeric(results[column], errors="raise")
+            selected[field] = [column]
+        active_columns = [
+            "DC House Hub Other Replay Active (-)",
+            "DC House Outside Hub Replay Active (-)",
+        ]
+        if all(column in results for column in active_columns):
+            hub_active = pd.to_numeric(results[active_columns[0]], errors="raise").astype(bool)
+            outside_active = pd.to_numeric(results[active_columns[1]], errors="raise").astype(bool)
+            if not hub_active.equals(outside_active):
+                raise OutputMappingError(f"{home_id}: Home Hub split replay activity disagrees")
+            active = hub_active
+        else:
+            active = pd.Series(True, index=results.index)
+        split_total = standardized["hub_other_power_kw"] + standardized["outside_hub_power_kw"]
+        error = (standardized.loc[active, "rest_of_home_power_kw"] - split_total.loc[active]).abs().max()
+        if pd.notna(error) and (not np.isfinite(error) or error > numerical_tolerance_kw):
+            raise OutputMappingError(
+                f"{home_id}: Home Hub split disagrees with derived rest-of-home power "
+                f"by up to {error:.6g} kW"
+            )
+        if resistance_outside_hub:
+            resistance_key = "HVAC Heating ER Power (kW)"
+            if resistance_key not in results:
+                raise OutputMappingError(
+                    f"{home_id}: resistance-outside-Hub reporting requires {resistance_key}"
+                )
+            resistance = pd.to_numeric(results[resistance_key], errors="raise")
+            if (not np.isfinite(resistance.to_numpy(float)).all()
+                    or resistance.lt(-numerical_tolerance_kw).any()):
+                raise OutputMappingError(f"{home_id}: invalid HVAC resistance power")
+            standardized["hvac_resistance_power_kw"] = resistance
+            selected["hvac_resistance_power_kw"] = [resistance_key]
+            standardized["outside_hub_with_resistance_power_kw"] = (
+                standardized["outside_hub_power_kw"] + resistance
+            )
+            selected["outside_hub_with_resistance_power_kw"] = [
+                "derived: fixed Outside-Hub + HVAC resistance"
+            ]
+            standardized["home_hub_non_ev_power_kw"] = (
+                standardized["hvac_power_kw"] - resistance
+                + standardized["water_heating_power_kw"]
+                + standardized["hub_other_power_kw"]
+            )
+            selected["home_hub_non_ev_power_kw"] = [
+                "derived: HVAC minus resistance + water heating + Hub-other"
+            ]
+            whole_home_error = (
+                standardized["total_electric_power_kw"]
+                - standardized["home_hub_non_ev_power_kw"]
+                - standardized["ev_power_kw"]
+                - standardized["outside_hub_with_resistance_power_kw"]
+            ).abs().max()
+            if pd.notna(whole_home_error) and whole_home_error > numerical_tolerance_kw:
+                raise OutputMappingError(
+                    f"{home_id}: resistance-outside-Hub whole-home balance differs "
+                    f"by up to {whole_home_error:.6g} kW"
+                )
+        else:
+            standardized["home_hub_non_ev_power_kw"] = (
+                standardized["hvac_power_kw"]
+                + standardized["water_heating_power_kw"]
+                + standardized["hub_other_power_kw"]
+            )
+            selected["home_hub_non_ev_power_kw"] = [
+                "derived: HVAC + water heating + Hub-other"
+            ]
+    elif resistance_outside_hub:
+        raise OutputMappingError(
+            f"{home_id}: resistance-outside-Hub reporting requires split replay loads"
+        )
     standardized.index.name = "timestamp"
     return StandardizedResults(standardized, selected)

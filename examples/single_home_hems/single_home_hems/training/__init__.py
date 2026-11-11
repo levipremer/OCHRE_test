@@ -2,55 +2,67 @@
 
 from .hvac import (
     DAY_INDICATOR_COLUMN,
+    NIGHT_INDICATOR_COLUMN,
     DIFFUSE_HORIZONTAL_IRRADIANCE_COLUMN,
     DIRECT_NORMAL_IRRADIANCE_COLUMN,
     GLOBAL_SOLAR_COLUMN,
+    HEATING_SETPOINT_PERIODS,
+    HVAC_COIL_ER_HEAT_COLUMN,
     HVAC_HEAT_COLUMN,
+    HVAC_HEATING_POWER_COLUMN,
+    HVAC_ER_HEAT_COLUMN,
+    HVAC_FAN_POWER_COLUMN,
+    HVAC_HP_COIL_HEAT_COLUMN,
+    HVAC_HP_MAIN_POWER_COLUMN,
+    HVAC_HP_PROXY_COLUMN,
     HVAC_POWER_COLUMN,
+    HVAC_PROXY_HEAT_COLUMN,
     INDOOR_TEMPERATURE_COLUMN,
     NEXT_INDOOR_TEMPERATURE_COLUMN,
+    OUTDOOR_RELATIVE_HUMIDITY_COLUMN,
     OUTDOOR_TEMPERATURE_COLUMN,
     SOLAR_AZIMUTH_COLUMN,
     SOLAR_ZENITH_COLUMN,
     HVACInternalGainRegime,
+    calculate_hvac_proxy_heat_w,
+    heating_setpoint_c,
+    heating_setpoints_c,
+    hvac_proxy_from_equipment,
     hvac_training_record,
 )
-from .hvac_model import (
-    HVACDatasetSplits,
-    HVACStateSpaceConfig,
-    HVACSplitWindows,
-    HVACTrainingDataset,
-    HVACTrainingWindow,
-    add_projected_dni_candidates,
-    aggregate_hvac_dataset,
-    evaluate_hvac_state_space_model,
-    load_hvac_training_data,
-    prepare_hvac_dataset_splits,
-    prepare_hvac_training_dataset,
-    projected_dni_column,
-    to_hvac_state_space_frame,
-    train_hvac_model,
-)
 from .water_heater import WaterHeaterSensorLayout, water_heater_training_record
-from .water_heater_model import (
-    DELIVERED_HEAT_COLUMN,
-    DISTURBANCE_COLUMNS,
-    POWER_COLUMN,
-    SETPOINT_COLUMN,
-    WaterHeaterDatasetSplits,
-    WaterHeaterStateSpaceConfig,
-    WaterHeaterSplitWindows,
-    WaterHeaterTrainingDataset,
-    WaterHeaterTrainingWindow,
-    aggregate_water_heater_dataset,
-    evaluate_water_heater_state_space_model,
-    load_water_heater_training_data,
-    next_sensor_columns,
-    prepare_water_heater_dataset_splits,
-    prepare_water_heater_training_dataset,
-    to_state_space_frame,
-    train_water_heater_model,
-)
+
+_HVAC_MODEL_EXPORTS = {
+    "HVACDatasetSplits", "HVACStateSpaceConfig", "HVACSplitWindows",
+    "HVACTrainingDataset", "HVACTrainingWindow", "add_projected_dni_candidates",
+    "aggregate_hvac_dataset", "evaluate_hvac_state_space_model",
+    "load_hvac_training_data", "prepare_hvac_dataset_splits",
+    "prepare_hvac_training_dataset", "projected_dni_column",
+    "to_hvac_state_space_frame", "train_hvac_model",
+}
+_WATER_MODEL_EXPORTS = {
+    "DELIVERED_HEAT_COLUMN", "DISTURBANCE_COLUMNS", "POWER_COLUMN",
+    "SETPOINT_COLUMN", "WaterHeaterDatasetSplits", "WaterHeaterStateSpaceConfig",
+    "WaterHeaterSplitWindows", "WaterHeaterTrainingDataset",
+    "WaterHeaterTrainingWindow", "aggregate_water_heater_dataset",
+    "evaluate_water_heater_state_space_model", "load_water_heater_training_data",
+    "next_sensor_columns", "prepare_water_heater_dataset_splits",
+    "prepare_water_heater_training_dataset", "to_state_space_frame",
+    "train_water_heater_model",
+}
+
+
+def __getattr__(name: str):
+    """Load training-only model helpers when a caller requests them."""
+    if name in _HVAC_MODEL_EXPORTS:
+        from . import hvac_model as module
+    elif name in _WATER_MODEL_EXPORTS:
+        from . import water_heater_model as module
+    else:
+        raise AttributeError(name)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "HVACInternalGainRegime",
@@ -60,13 +72,27 @@ __all__ = [
     "HVACTrainingDataset",
     "HVACTrainingWindow",
     "DAY_INDICATOR_COLUMN",
+    "NIGHT_INDICATOR_COLUMN",
     "DIFFUSE_HORIZONTAL_IRRADIANCE_COLUMN",
     "DIRECT_NORMAL_IRRADIANCE_COLUMN",
     "GLOBAL_SOLAR_COLUMN",
+    "HEATING_SETPOINT_PERIODS",
+    "HVAC_COIL_ER_HEAT_COLUMN",
     "HVAC_HEAT_COLUMN",
+    "HVAC_HEATING_POWER_COLUMN",
+    "HVAC_ER_HEAT_COLUMN",
+    "HVAC_FAN_POWER_COLUMN",
+    "HVAC_HP_COIL_HEAT_COLUMN",
+    "HVAC_HP_MAIN_POWER_COLUMN",
+    "HVAC_HP_PROXY_COLUMN",
     "HVAC_POWER_COLUMN",
+    "HVAC_PROXY_HEAT_COLUMN",
+    "calculate_hvac_proxy_heat_w",
+    "heating_setpoint_c",
+    "heating_setpoints_c",
     "INDOOR_TEMPERATURE_COLUMN",
     "NEXT_INDOOR_TEMPERATURE_COLUMN",
+    "OUTDOOR_RELATIVE_HUMIDITY_COLUMN",
     "OUTDOOR_TEMPERATURE_COLUMN",
     "SOLAR_AZIMUTH_COLUMN",
     "SOLAR_ZENITH_COLUMN",
@@ -86,6 +112,7 @@ __all__ = [
     "evaluate_hvac_state_space_model",
     "evaluate_water_heater_state_space_model",
     "hvac_training_record",
+    "hvac_proxy_from_equipment",
     "load_hvac_training_data",
     "load_water_heater_training_data",
     "next_sensor_columns",

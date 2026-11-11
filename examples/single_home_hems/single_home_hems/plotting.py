@@ -201,6 +201,7 @@ def plot_water_heater(
     dpi: int,
     water_usage: pd.Series | None = None,
     temperature_limits: tuple[float, float] | None = None,
+    power_limits: tuple[float, float] | None = None,
 ) -> None:
     """Plot water-heater temperatures and power."""
     figure, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
@@ -236,6 +237,8 @@ def plot_water_heater(
         label="Water-heater power",
     )
     axes[1].set_ylabel("Power (kW)")
+    if power_limits is not None:
+        axes[1].set_ylim(power_limits)
     axes[1].set_xlabel("Time of day")
     price_axis = _add_price_axis(axes[1], price)
     _combined_legend(axes[1], price_axis, loc="upper left")
@@ -373,8 +376,9 @@ def plot_water_heater_baseline(
     dpi: int,
     water_usage: pd.Series | None = None,
     temperature_limits: tuple[float, float] | None = None,
+    power_limits: tuple[float, float] | None = None,
 ) -> None:
-    """Plot tank temperatures and delivered heat for the uncontrolled run."""
+    """Plot tank temperatures and electrical consumption for the baseline."""
     figure, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
 
     sensor_positions = ((sensor_columns[0], "Upper tank", "tab:blue"),)
@@ -401,13 +405,16 @@ def plot_water_heater_baseline(
 
     axes[1].plot(
         training_data.index,
-        training_data["water_heater_delivered_heat_kw"],
+        training_data["water_heater_electric_power_kw"],
         color="tab:blue",
-        label="Heat input",
+        label="Water-heater electrical power",
     )
-    axes[1].set_ylabel("Heat input (kW)")
+    axes[1].set_ylabel("Power (kW)")
     axes[1].set_xlabel("Time of day")
-    axes[1].set_ylim(bottom=0)
+    if power_limits is not None:
+        axes[1].set_ylim(power_limits)
+    else:
+        axes[1].set_ylim(bottom=0)
     axes[1].legend()
 
     for axis in axes:
@@ -567,6 +574,105 @@ def plot_ev(
     plt.close(figure)
 
 
+def plot_ev_operation(
+    results: pd.DataFrame,
+    raw: pd.DataFrame,
+    price: pd.Series,
+    home_id: str,
+    operation: str,
+    output_file: Path,
+    dpi: int,
+    *,
+    power_limits: tuple[float, float] | None = None,
+    health_soc_bounds: tuple[float, float] | None = None,
+    comfort_soc_min: float | None = None,
+) -> None:
+    """Show one EV case with matched SOC and signed AC-power axes.
+
+    ``results`` defines the evaluation window. The raw plant output may also
+    contain warmup rows, which are deliberately excluded from these figures.
+    """
+    if results.empty or not isinstance(results.index, pd.DatetimeIndex):
+        raise ValueError("EV operation needs nonempty timestamped results")
+    if not results.index.isin(raw.index).all() or not results.index.isin(price.index).all():
+        raise ValueError("EV operation raw state and tariff must cover every plotted minute")
+    index = results.index
+    plotted_raw = raw.loc[index]
+    plotted_price = pd.to_numeric(price.loc[index], errors="coerce")
+    if plotted_price.isna().any():
+        raise ValueError("EV operation tariff must be finite over the plotted window")
+
+    # Prefer the end-of-step SOC recorded by the opt-in EV plant. Legacy EVs
+    # report only the current SOC, so use that when the end state is absent.
+    # Exactly one trace is drawn for each vehicle.
+    vehicles = sorted({
+        column.removeprefix("EV_").removesuffix(" Electric Power (kW)")
+        for column in plotted_raw
+        if column.startswith("EV_") and column.endswith(" Electric Power (kW)")
+    })
+    if not vehicles:
+        raise ValueError("EV operation requires per-vehicle power for at least one EV")
+    if power_limits is not None and (len(power_limits) != 2 or power_limits[0] >= power_limits[1]):
+        raise ValueError("EV power limits must be an increasing pair")
+    if health_soc_bounds is not None and (
+        len(health_soc_bounds) != 2 or not 0 <= health_soc_bounds[0] <= health_soc_bounds[1] <= 1
+    ):
+        raise ValueError("EV healthy SOC bounds must lie in [0,1] and be ordered")
+    if comfort_soc_min is not None and not 0 <= comfort_soc_min <= 1:
+        raise ValueError("EV departure comfort target must lie in [0,1]")
+
+    figure, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
+    soc_axis, power_axis = axes
+    if health_soc_bounds is not None:
+        soc_axis.axhspan(*health_soc_bounds, color="tab:green", alpha=0.1,
+                         label="Healthy SOC band (soft)")
+    if comfort_soc_min is not None:
+        soc_axis.axhline(comfort_soc_min, color="tab:orange", linestyle=":",
+                         linewidth=1.4, label="Departure comfort target")
+    location_axis = soc_axis.twinx()
+    for vehicle in vehicles:
+        name = f"EV_{vehicle}"
+        soc_column = next((column for column in (
+            f"{name} End SOC (-)", f"{name} SOC (-)"
+        ) if column in plotted_raw), None)
+        if soc_column is None:
+            raise ValueError(f"EV operation requires SOC for {name}")
+        soc_axis.plot(index, plotted_raw[soc_column], label=f"EV {vehicle} SOC")
+        parked = plotted_raw.get(f"{name} Parked")
+        if parked is None:
+            mode = plotted_raw.get(f"{name} Mode")
+            if mode is None:
+                raise ValueError(f"EV operation requires parked state or mode for {name}")
+            parked = mode.ne("Away")
+        location_axis.step(index, parked.astype(int), where="post", linestyle="--",
+                           alpha=0.65, label=f"EV {vehicle} home")
+        power_column = f"{name} Electric Power (kW)"
+        if power_column not in plotted_raw:
+            raise ValueError(f"EV operation requires electric power for {name}")
+        power_axis.step(index, plotted_raw[power_column], where="post",
+                        label=f"EV {vehicle} AC power")
+    soc_axis.set_title(f"{home_id}: EV {operation}")
+    soc_axis.set_ylabel("SOC (fraction)")
+    soc_axis.set_ylim(-0.02, 1.02)
+    location_axis.set_ylabel("Vehicle location")
+    location_axis.set_yticks([0, 1], labels=["Away", "Home"])
+    location_axis.set_ylim(-0.1, 1.1)
+    _combined_legend(soc_axis, location_axis, loc="lower left")
+
+    power_axis.axhline(0, color="0.4", linewidth=0.9)
+    power_axis.set_ylabel("Signed AC power (kW)")
+    power_axis.set_xlabel("Time of day")
+    if power_limits is not None:
+        power_axis.set_ylim(*power_limits)
+    price_axis = _add_price_axis(power_axis, plotted_price)
+    _combined_legend(power_axis, price_axis, loc="upper left")
+    for axis in axes:
+        _format_time_axis(axis)
+    figure.tight_layout()
+    figure.savefig(output_file, dpi=dpi)
+    plt.close(figure)
+
+
 def plot_whole_home_comparison(
     controlled: pd.DataFrame,
     uncontrolled: pd.DataFrame,
@@ -574,29 +680,110 @@ def plot_whole_home_comparison(
     home_id: str,
     output_file: Path,
     dpi: int,
+    *,
+    power_limits: tuple[float, float] | None = None,
 ) -> None:
-    """Compare whole-home power with and without the HEMS control."""
+    """Compare measured one-minute power with and without HEMS control."""
     figure, axis = plt.subplots(figsize=(11, 5))
     axis.plot(
         uncontrolled.index,
         uncontrolled["total_electric_power_kw"],
         color="0.45",
         linewidth=1.5,
-        label="Without control",
+        label="Baseline (1 minute)",
     )
     axis.plot(
         controlled.index,
         controlled["total_electric_power_kw"],
         color="tab:blue",
         linewidth=1.5,
-        label="With control",
+        label="Predictive (1 minute)",
     )
-    axis.set_title(f"{home_id}: whole-home power comparison")
-    axis.set_ylabel("Whole-home power (kW)")
+    axis.set_title(f"{home_id}: measured one-minute whole-home power")
+    axis.set_ylabel("Net electric power (kW)")
     axis.set_xlabel("Time of day")
+    if power_limits is not None:
+        axis.set_ylim(*power_limits)
     price_axis = _add_price_axis(axis, price)
+    price_axis.set_ylim(0, max(0.01, float(price.max()) * 1.15))
     _combined_legend(axis, price_axis, loc="upper left", ncol=3)
     _format_time_axis(axis)
+    figure.tight_layout()
+    figure.savefig(output_file, dpi=dpi)
+    plt.close(figure)
+
+
+def plot_whole_home_operation(
+    results: pd.DataFrame,
+    price: pd.Series,
+    home_id: str,
+    operation: str,
+    output_file: Path,
+    dpi: int,
+    *,
+    power_limits: tuple[float, float],
+) -> None:
+    """Show measured grid power and the aligned averages used for peak reporting."""
+    power = results["total_electric_power_kw"].astype(float)
+    aligned_power = power.resample("15min").mean()
+    night_bins = aligned_power.loc[
+        (aligned_power.index.hour >= 3) & (aligned_power.index.hour < 7)
+    ]
+    night_peak_label = f"{night_bins.max():.2f} kW" if not night_bins.empty else "n/a"
+    plotted_price = price.reindex(power.index)
+    if plotted_price.isna().any():
+        raise ValueError("Tariff series does not cover the whole-home power plot")
+
+    figure, (power_axis, tariff_axis) = plt.subplots(
+        2, 1, figsize=(11, 6.5), sharex=True,
+        gridspec_kw={"height_ratios": [4, 1]},
+    )
+    color = "0.35" if operation == "Baseline" else "tab:blue"
+    power_axis.plot(
+        power.index, power, color=color, linewidth=0.65, alpha=0.45,
+        label="Measured 1-minute power",
+    )
+    power_axis.step(
+        aligned_power.index, aligned_power, where="post", color=color,
+        linewidth=1.6, label="Aligned 15-minute mean",
+    )
+    first_peak_window = True
+    for day in pd.date_range(
+        power.index.min().normalize(), power.index.max().normalize(), freq="D"
+    ):
+        window_start = day + pd.Timedelta(hours=3)
+        window_end = day + pd.Timedelta(hours=7)
+        if window_start <= power.index.max() and window_end > power.index.min():
+            for axis in (power_axis, tariff_axis):
+                axis.axvspan(
+                    window_start, window_end, color="tab:green", alpha=0.09,
+                    label=(
+                        "03:00–07:00 peak window"
+                        if axis is power_axis and first_peak_window else None
+                    ),
+                )
+            first_peak_window = False
+    power_axis.set_title(f"{home_id}: whole-home grid power — {operation.lower()}")
+    power_axis.set_ylabel("Net electric power (kW)")
+    power_axis.set_ylim(*power_limits)
+    power_axis.legend(loc="upper left", ncol=3, fontsize="small")
+    power_axis.text(
+        0.99, 0.97,
+        f"All-hour 15-min peak: {aligned_power.max():.2f} kW\n"
+        f"03:00–07:00 peak: {night_peak_label}",
+        transform=power_axis.transAxes, ha="right", va="top", fontsize="small",
+        bbox={"facecolor": "white", "edgecolor": "0.8", "alpha": 0.85},
+    )
+    tariff_axis.step(
+        plotted_price.index, plotted_price, where="post",
+        color="tab:orange", linewidth=1.2,
+    )
+    tariff_axis.set_ylabel("Price\n($/kWh)")
+    tariff_axis.set_ylim(0, max(0.01, float(plotted_price.max()) * 1.15))
+    tariff_axis.set_xlim(power.index.min(), power.index.max())
+    for axis in (power_axis, tariff_axis):
+        _format_time_axis(axis)
+    power_axis.set_xlabel("")
     figure.tight_layout()
     figure.savefig(output_file, dpi=dpi)
     plt.close(figure)
